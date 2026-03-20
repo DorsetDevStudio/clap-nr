@@ -157,6 +157,13 @@ typedef struct {
      * process() checks this flag and does passthrough if false, guarding
      * against hosts that call process() outside the active_state window. */
     bool active;
+
+    /* Incremented by process() on entry, decremented on exit.  deactivate()
+     * spins on this reaching zero before returning, guaranteeing that
+     * plugin_destroy() will never run concurrently with process().  This is
+     * the only safe way to allow destroy_emnr() (which calls
+     * fftw_destroy_plan()) to run without racing the audio thread. */
+    volatile LONG process_depth;
 } clap_nr_t;
 
 /* -----------------------------------------------------------------------
@@ -458,17 +465,24 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
 static void plugin_deactivate(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
-    /* Flag inactive first so that any process() call that races with
-     * the host's thread teardown will do a safe passthrough instead of
-     * touching the NR instances.
-     *
-     * We intentionally do NOT destroy the NR algorithm instances here.
-     * Destroying FFTW3 plans (owned by EMNR) while xemnr() may still be
-     * mid-execution on the audio thread causes FFTW3 to call abort(),
-     * which terminates the entire host process and cannot be caught with
-     * Windows SEH.  All NR resources are released in plugin_destroy(),
-     * which is guaranteed to run only after audio has fully stopped. */
+
+    /* Signal the audio thread to stop doing real work. */
     self->active = false;
+
+    /* Drain: spin until any currently-executing process() call has returned.
+     *
+     * Why this matters: deactivate() is called on the main thread.  The host
+     * then calls plugin_destroy() — also on the main thread — which calls
+     * destroy_emnr() → fftw_destroy_plan().  If the audio thread is still
+     * inside fftw_execute() at that moment, FFTW3 calls abort() and kills
+     * the entire host process.  Windows SEH cannot catch abort().
+     *
+     * By waiting here for process_depth to hit zero we guarantee that no
+     * process() call is in flight before control returns to the host.  The
+     * wait is bounded by one audio buffer (typically 1-10 ms) so it does
+     * not block the UI perceptibly. */
+    while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
+        Sleep(0);
 }
 
 static bool plugin_start_processing(const clap_plugin_t *p) { (void)p; return true; }
@@ -499,6 +513,9 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
 {
     clap_nr_t *self = (clap_nr_t *)p;
 
+    /* Register this call so deactivate() can wait for us to finish. */
+    InterlockedIncrement(&self->process_depth);
+
     /* Guard: passthrough if deactivate() has already been called or activate()
      * has never been called.  Handles hosts that call process() outside the
      * active_state window defined by the CLAP spec. */
@@ -514,6 +531,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 if (src && dst && src != dst) memcpy(dst, src, nc * sizeof(float));
             }
         }
+        InterlockedDecrement(&self->process_depth);
         return CLAP_PROCESS_CONTINUE;
     }
 
@@ -540,8 +558,10 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         self->params_dirty = false;
     }
 
-    if (n == 0 || proc->audio_inputs_count == 0 || proc->audio_outputs_count == 0)
+    if (n == 0 || proc->audio_inputs_count == 0 || proc->audio_outputs_count == 0) {
+        InterlockedDecrement(&self->process_depth);
         return CLAP_PROCESS_CONTINUE;
+    }
 
     const clap_audio_buffer_t *in_buf  = &proc->audio_inputs[0];
     const clap_audio_buffer_t *out_buf = &proc->audio_outputs[0];
@@ -557,6 +577,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             if (src && dst && src != dst)
                 memcpy(dst, src, n * sizeof(float));
         }
+        InterlockedDecrement(&self->process_depth);
         return CLAP_PROCESS_CONTINUE;
     }
 
@@ -619,6 +640,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         }
     }
 
+    InterlockedDecrement(&self->process_depth);
     return CLAP_PROCESS_CONTINUE;
 }
 

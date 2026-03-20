@@ -338,27 +338,35 @@ static LRESULT CALLBACK gui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HWND sld = (HWND)lp;
         int pos = (int)SendMessageA(sld, TBM_GETPOS, 0, 0);
         char buf[64];
+        /* Collect what changed (if anything) before touching g->updating,
+         * then reset updating unconditionally before calling the callback.
+         * Previously, updating was reset inside the value-changed branches
+         * only — if the slider moved to a position that mapped to the same
+         * float value, the inner branch was skipped while the outer branch
+         * had already matched, so updating was never cleared and the window
+         * stopped responding to all further input. */
+        bool    changed     = false;
+        clap_id changed_id  = 0;
+        double  changed_val = 0.0;
+
         g->updating = true;
         if (sld == g->sld_taps && pos != g->anr_taps) {
             g->anr_taps = pos;
             snprintf(buf, sizeof(buf), "%d", pos);
             SetWindowTextA(g->edit_taps, buf);
-            g->updating = false;
-            g->on_param_change(g->plugin, _GUI_PARAM_ANR_TAPS, (double)pos);
+            changed = true; changed_id = _GUI_PARAM_ANR_TAPS; changed_val = (double)pos;
         } else if (sld == g->sld_delay && pos != g->anr_delay) {
             g->anr_delay = pos;
             snprintf(buf, sizeof(buf), "%d", pos);
             SetWindowTextA(g->edit_delay, buf);
-            g->updating = false;
-            g->on_param_change(g->plugin, _GUI_PARAM_ANR_DELAY, (double)pos);
+            changed = true; changed_id = _GUI_PARAM_ANR_DELAY; changed_val = (double)pos;
         } else if (sld == g->sld_gain) {
             double v = slider_to_gain(pos);
             if (v != g->anr_gain) {
                 g->anr_gain = v;
                 snprintf(buf, sizeof(buf), "%.6f", v);
                 SetWindowTextA(g->edit_gain, buf);
-                g->updating = false;
-                g->on_param_change(g->plugin, _GUI_PARAM_ANR_GAIN, v);
+                changed = true; changed_id = _GUI_PARAM_ANR_GAIN; changed_val = v;
             }
         } else if (sld == g->sld_leak) {
             double v = slider_to_leak(pos);
@@ -366,12 +374,12 @@ static LRESULT CALLBACK gui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 g->anr_leakage = v;
                 snprintf(buf, sizeof(buf), "%.4f", v);
                 SetWindowTextA(g->edit_leak, buf);
-                g->updating = false;
-                g->on_param_change(g->plugin, _GUI_PARAM_ANR_LEAKAGE, v);
+                changed = true; changed_id = _GUI_PARAM_ANR_LEAKAGE; changed_val = v;
             }
-        } else {
-            g->updating = false;
         }
+        g->updating = false; /* always reset before calling callback */
+        if (changed)
+            g->on_param_change(g->plugin, changed_id, changed_val);
         return 0;
     }
 

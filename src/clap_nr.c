@@ -145,6 +145,18 @@ typedef struct {
 
     /* Pending param->host notification (set by GUI, cleared by flush) */
     bool param_dirty[PARAM_COUNT];
+
+    /* Set by handle_param_event (any thread); cleared at the start of
+     * process() after applying changes to the live NR instances.
+     * Keeping all apply_*() calls inside process() means NR algorithm
+     * state is only ever modified from the audio thread, eliminating
+     * the race between the GUI/main thread and the audio thread. */
+    bool params_dirty;
+
+    /* True between a successful activate() and the subsequent deactivate().
+     * process() checks this flag and does passthrough if false, guarding
+     * against hosts that call process() outside the active_state window. */
+    bool active;
 } clap_nr_t;
 
 /* -----------------------------------------------------------------------
@@ -168,13 +180,20 @@ static void apply_anr_params_ch(clap_nr_t *self, int ch)
 {
     ANR a = self->anr[ch];
     if (!a) return;
+    /* Only reset the delay lines when the filter structure changes (tap count
+     * or decorrelation delay).  Gain and leakage can be updated in-place
+     * without wiping history — doing so on every slider move was the cause
+     * of audible glitches during parameter adjustment. */
+    bool structural = (a->n_taps != self->anr_taps || a->delay != self->anr_delay);
     a->n_taps = self->anr_taps;
     a->delay  = self->anr_delay;
     a->two_mu = self->anr_gain;
     a->gamma  = self->anr_leakage;
-    memset(a->d, 0, sizeof(a->d));
-    memset(a->w, 0, sizeof(a->w));
-    a->in_idx = 0;
+    if (structural) {
+        memset(a->d, 0, sizeof(a->d));
+        memset(a->w, 0, sizeof(a->w));
+        a->in_idx = 0;
+    }
 }
 
 static void apply_anr_params(clap_nr_t *self)
@@ -216,45 +235,24 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
  * --------------------------------------------------------------------- */
 static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *pv)
 {
+    /* Update only the cached parameter values.  Do NOT call apply_*() here.
+     * This function is called from both the main thread (GUI callback) and the
+     * audio thread (in-band host events).  Touching live NR algorithm state
+     * from two threads simultaneously was the primary cause of crashes.
+     * All apply_*() calls are deferred to the start of plugin_process(). */
     switch (pv->param_id) {
-    case PARAM_NR_MODE:
-        apply_nr_mode(self, (int)pv->value);
-        break;
-    case PARAM_NR4_REDUCTION:
-        self->nr4_reduction = (float)pv->value;
-        for (int ch = 0; ch < 2; ++ch)
-            if (self->sbnr[ch]) self->sbnr[ch]->reduction_amount = self->nr4_reduction;
-        break;
-    case PARAM_ANR_TAPS:
-        self->anr_taps = (int)pv->value;
-        apply_anr_params(self);
-        break;
-    case PARAM_ANR_DELAY:
-        self->anr_delay = (int)pv->value;
-        apply_anr_params(self);
-        break;
-    case PARAM_ANR_GAIN:
-        self->anr_gain = pv->value;
-        apply_anr_params(self);
-        break;
-    case PARAM_ANR_LEAKAGE:
-        self->anr_leakage = pv->value;
-        apply_anr_params(self);
-        break;
-    case PARAM_EMNR_GAIN_METHOD:
-        self->emnr_gain_method = (int)pv->value;
-        apply_emnr_params(self);
-        break;
-    case PARAM_EMNR_NPE_METHOD:
-        self->emnr_npe_method = (int)pv->value;
-        apply_emnr_params(self);
-        break;
-    case PARAM_EMNR_AE_RUN:
-        self->emnr_ae_run = (int)pv->value;
-        apply_emnr_params(self);
-        break;
+    case PARAM_NR_MODE:          self->nr_mode          = (int)pv->value;  break;
+    case PARAM_NR4_REDUCTION:    self->nr4_reduction    = (float)pv->value; break;
+    case PARAM_ANR_TAPS:         self->anr_taps         = (int)pv->value;  break;
+    case PARAM_ANR_DELAY:        self->anr_delay        = (int)pv->value;  break;
+    case PARAM_ANR_GAIN:         self->anr_gain         = pv->value;       break;
+    case PARAM_ANR_LEAKAGE:      self->anr_leakage      = pv->value;       break;
+    case PARAM_EMNR_GAIN_METHOD: self->emnr_gain_method = (int)pv->value;  break;
+    case PARAM_EMNR_NPE_METHOD:  self->emnr_npe_method  = (int)pv->value;  break;
+    case PARAM_EMNR_AE_RUN:      self->emnr_ae_run      = (int)pv->value;  break;
     default: break;
     }
+    self->params_dirty = true;
 }
 
 /* -----------------------------------------------------------------------
@@ -327,51 +325,114 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
 {
     clap_nr_t *self = (clap_nr_t *)p;
     (void)min_frames;
-    self->sample_rate = sr;
-    self->block_size  = max_frames;
 
     bool ok = false;
     __try {
-        /* Allocate independent buffers and NR instances for each channel.
-         * Both channels share identical parameter settings but have fully
-         * separate internal state so L and R are never mixed. */
-        for (int ch = 0; ch < 2; ++ch) {
-            /* NR algorithms use interleaved complex (I/Q) layout:
-             * index [2*i+0] = real sample, [2*i+1] = imaginary (kept 0 for
-             * real audio).  Allocate 2*max_frames doubles per channel. */
-            self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
-            if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); __leave; }
+        if (self->buf[0] == NULL) {
+            /* ---- First activation: allocate buffers and create NR instances ---- */
+            self->sample_rate = sr;
+            self->block_size  = max_frames;
 
-            nr_log("activate: creating ANR ch=%d sr=%.0f frames=%u", ch, sr, max_frames);
-            self->anr[ch]  = create_anr(0, 0, (int)max_frames,
-                                        self->buf[ch], self->buf[ch],
-                                        2048,
-                                        self->anr_taps, self->anr_delay,
-                                        self->anr_gain, self->anr_leakage,
-                                        120.0, 120.0, 200.0, 0.001, 6.25e-10, 1.0, 3.0);
+            for (int ch = 0; ch < 2; ++ch) {
+                /* NR algorithms use interleaved complex (I/Q) layout:
+                 * index [2*i+0] = real sample, [2*i+1] = imaginary (kept 0). */
+                self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
+                if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); __leave; }
 
-            nr_log("activate: creating EMNR ch=%d", ch);
-            self->emnr[ch] = create_emnr(0, 0, (int)max_frames,
-                                         self->buf[ch], self->buf[ch],
-                                         4096, 4, (int)sr, 0, 1.0,
-                                         self->emnr_gain_method,
-                                         self->emnr_npe_method,
-                                         self->emnr_ae_run);
+                nr_log("activate: creating ANR ch=%d sr=%.0f frames=%u", ch, sr, max_frames);
+                self->anr[ch]  = create_anr(0, 0, (int)max_frames,
+                                            self->buf[ch], self->buf[ch],
+                                            2048,
+                                            self->anr_taps, self->anr_delay,
+                                            self->anr_gain, self->anr_leakage,
+                                            120.0, 120.0, 200.0, 0.001, 6.25e-10, 1.0, 3.0);
 
-            nr_log("activate: creating RNNR ch=%d", ch);
-            self->rnnr[ch] = create_rnnr(0, 0, (int)max_frames,
-                                         self->buf[ch], self->buf[ch], (int)sr);
+                nr_log("activate: creating EMNR ch=%d", ch);
+                self->emnr[ch] = create_emnr(0, 0, (int)max_frames,
+                                             self->buf[ch], self->buf[ch],
+                                             4096, 4, (int)sr, 0, 1.0,
+                                             self->emnr_gain_method,
+                                             self->emnr_npe_method,
+                                             self->emnr_ae_run);
 
-            nr_log("activate: creating SBNR ch=%d", ch);
-            self->sbnr[ch] = create_sbnr(0, 0, (int)max_frames,
-                                         self->buf[ch], self->buf[ch], (int)sr);
+                nr_log("activate: creating RNNR ch=%d", ch);
+                self->rnnr[ch] = create_rnnr(0, 0, (int)max_frames,
+                                             self->buf[ch], self->buf[ch], (int)sr);
 
-            if (!self->anr[ch] || !self->emnr[ch] || !self->rnnr[ch] || !self->sbnr[ch]) {
-                nr_log("activate: create_* returned NULL ch=%d anr=%p emnr=%p rnnr=%p sbnr=%p",
-                       ch, (void*)self->anr[ch], (void*)self->emnr[ch],
-                       (void*)self->rnnr[ch], (void*)self->sbnr[ch]);
-                __leave;
+                nr_log("activate: creating SBNR ch=%d", ch);
+                self->sbnr[ch] = create_sbnr(0, 0, (int)max_frames,
+                                             self->buf[ch], self->buf[ch], (int)sr);
+
+                if (!self->anr[ch] || !self->emnr[ch] || !self->rnnr[ch] || !self->sbnr[ch]) {
+                    nr_log("activate: create_* returned NULL ch=%d anr=%p emnr=%p rnnr=%p sbnr=%p",
+                           ch, (void*)self->anr[ch], (void*)self->emnr[ch],
+                           (void*)self->rnnr[ch], (void*)self->sbnr[ch]);
+                    __leave;
+                }
             }
+        } else {
+            /* ---- Re-activation after a deactivate / enable-disable cycle ----
+             *
+             * Re-use existing NR instances rather than destroying and re-creating
+             * them.  The critical reason: EMNR owns FFTW3 plans.  Calling
+             * fftw_destroy_plan() on the main thread while the audio thread may
+             * still be a few microseconds inside fftw_execute() causes FFTW3 to
+             * call abort(), which kills the entire host process -- this cannot be
+             * caught with Windows SEH.  By keeping the instances alive and just
+             * flushing their state here, we avoid any plan teardown, which is the
+             * most common cause of "enable/disable crashes the host".
+             *
+             * All NR memory is released in plugin_destroy() instead, which is
+             * guaranteed to be called only after audio has fully stopped.        */
+
+            if (max_frames != self->block_size) {
+                /* Block size changed -- reallocate shared buffers and notify instances */
+                nr_log("reactivate: block size %u -> %u", self->block_size, max_frames);
+                for (int ch = 0; ch < 2; ++ch) {
+                    free(self->buf[ch]);
+                    self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
+                    if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); __leave; }
+
+                    if (self->anr[ch]) {
+                        setSize_anr   (self->anr[ch],  (int)max_frames);
+                        setBuffers_anr(self->anr[ch],  self->buf[ch], self->buf[ch]);
+                    }
+                    if (self->emnr[ch]) {
+                        setSize_emnr   (self->emnr[ch], (int)max_frames);
+                        setBuffers_emnr(self->emnr[ch], self->buf[ch], self->buf[ch]);
+                    }
+                    if (self->rnnr[ch]) {
+                        setSize_rnnr   (self->rnnr[ch], (int)max_frames);
+                        setBuffers_rnnr(self->rnnr[ch], self->buf[ch], self->buf[ch]);
+                    }
+                    if (self->sbnr[ch]) {
+                        setSize_sbnr   (self->sbnr[ch], (int)max_frames);
+                        setBuffers_sbnr(self->sbnr[ch], self->buf[ch], self->buf[ch]);
+                    }
+                }
+                self->block_size = max_frames;
+            }
+
+            if ((int)sr != (int)self->sample_rate) {
+                nr_log("reactivate: sample rate %.0f -> %.0f", self->sample_rate, sr);
+                for (int ch = 0; ch < 2; ++ch) {
+                    if (self->emnr[ch]) setSamplerate_emnr(self->emnr[ch], (int)sr);
+                    if (self->rnnr[ch]) setSamplerate_rnnr(self->rnnr[ch], (int)sr);
+                    if (self->sbnr[ch]) setSamplerate_sbnr(self->sbnr[ch], (int)sr);
+                }
+                self->sample_rate = sr;
+            }
+
+            /* Flush filter / accumulator state for a clean restart */
+            for (int ch = 0; ch < 2; ++ch) {
+                if (self->anr[ch])  flush_anr (self->anr[ch]);
+                if (self->emnr[ch]) flush_emnr(self->emnr[ch]);
+                /* RNNR / SBNR have no flush function; zeroing the shared buffer
+                 * drains their ring buffers on the next process() call. */
+                if (self->buf[ch])
+                    memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
+            }
+            nr_log("reactivate: flushed, sr=%.0f frames=%u", sr, max_frames);
         }
 
         apply_nr_mode(self, self->nr_mode);
@@ -381,57 +442,102 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
     __except (EXCEPTION_EXECUTE_HANDLER) {
         nr_log("activate: SEH exception 0x%08lX -- NR disabled",
                (unsigned long)GetExceptionCode());
-        /* Null out whatever was partially created so deactivate is safe */
         for (int ch = 0; ch < 2; ++ch) {
             self->anr[ch] = NULL; self->emnr[ch] = NULL;
             self->rnnr[ch] = NULL; self->sbnr[ch] = NULL;
             free(self->buf[ch]); self->buf[ch] = NULL;
         }
-        /* Fall back to bypass so the host can still run */
         self->nr_mode = 0;
-        ok = true; /* returning false would prevent the plugin loading at all */
+        ok = true;
     }
+
+    if (ok) self->active = true;
     return ok;
 }
 
 static void plugin_deactivate(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
-    __try {
-        for (int ch = 0; ch < 2; ++ch) {
-            if (self->anr[ch])  { destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
-            if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
-            if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
-            if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
-            free(self->buf[ch]); self->buf[ch] = NULL;
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        nr_log("deactivate: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
-        for (int ch = 0; ch < 2; ++ch) {
-            self->anr[ch] = NULL; self->emnr[ch] = NULL;
-            self->rnnr[ch] = NULL; self->sbnr[ch] = NULL;
-            self->buf[ch] = NULL;
-        }
-    }
+    /* Flag inactive first so that any process() call that races with
+     * the host's thread teardown will do a safe passthrough instead of
+     * touching the NR instances.
+     *
+     * We intentionally do NOT destroy the NR algorithm instances here.
+     * Destroying FFTW3 plans (owned by EMNR) while xemnr() may still be
+     * mid-execution on the audio thread causes FFTW3 to call abort(),
+     * which terminates the entire host process and cannot be caught with
+     * Windows SEH.  All NR resources are released in plugin_destroy(),
+     * which is guaranteed to run only after audio has fully stopped. */
+    self->active = false;
 }
 
 static bool plugin_start_processing(const clap_plugin_t *p) { (void)p; return true; }
 static void plugin_stop_processing (const clap_plugin_t *p) { (void)p; }
-static void plugin_reset           (const clap_plugin_t *p) { (void)p; }
+
+static void plugin_reset(const clap_plugin_t *p)
+{
+    clap_nr_t *self = (clap_nr_t *)p;
+    /* Flush algorithm internal state so a transport jump or plugin
+     * re-insertion starts clean without residual filter history. */
+    __try {
+        for (int ch = 0; ch < 2; ++ch) {
+            if (self->anr[ch])  flush_anr(self->anr[ch]);
+            if (self->emnr[ch]) flush_emnr(self->emnr[ch]);
+            /* RNNR and SBNR have no flush function; zero the shared I/O
+             * buffer which effectively drains their ring buffers on the
+             * next process() call. */
+            if (self->buf[ch] && self->block_size > 0)
+                memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        nr_log("reset: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
+    }
+}
 
 static clap_process_status plugin_process(const clap_plugin_t *p, const clap_process_t *proc)
 {
     clap_nr_t *self = (clap_nr_t *)p;
+
+    /* Guard: passthrough if deactivate() has already been called or activate()
+     * has never been called.  Handles hosts that call process() outside the
+     * active_state window defined by the CLAP spec. */
+    if (!self->active) {
+        uint32_t nc = proc->frames_count;
+        if (nc > 0 && proc->audio_inputs_count > 0 && proc->audio_outputs_count > 0) {
+            const clap_audio_buffer_t *ib = &proc->audio_inputs[0];
+            const clap_audio_buffer_t *ob = &proc->audio_outputs[0];
+            uint32_t cch = ib->channel_count < ob->channel_count
+                         ? ib->channel_count : ob->channel_count;
+            for (uint32_t ch = 0; ch < cch; ++ch) {
+                float *src = ib->data32[ch], *dst = ob->data32[ch];
+                if (src && dst && src != dst) memcpy(dst, src, nc * sizeof(float));
+            }
+        }
+        return CLAP_PROCESS_CONTINUE;
+    }
+
     uint32_t n = proc->frames_count;
 
-    /* Handle parameter events in sample-accurate order */
+    /* Step 1: consume in-band parameter events from the host. */
     const clap_input_events_t *ev = proc->in_events;
     uint32_t nevents = ev->size(ev);
     for (uint32_t i = 0; i < nevents; ++i) {
         const clap_event_header_t *hdr = ev->get(ev, i);
         if (hdr->type == CLAP_EVENT_PARAM_VALUE)
             handle_param_event(self, (const clap_event_param_value_t *)hdr);
+    }
+
+    /* Step 2: apply any pending parameter changes to the live NR instances.
+     * This is the ONE place that modifies algorithm state, so it runs
+     * exclusively on the audio thread with no concurrent main-thread access. */
+    if (self->params_dirty) {
+        apply_nr_mode(self, self->nr_mode);
+        apply_anr_params(self);
+        apply_emnr_params(self);
+        for (int _ch = 0; _ch < 2; ++_ch)
+            if (self->sbnr[_ch]) self->sbnr[_ch]->reduction_amount = self->nr4_reduction;
+        self->params_dirty = false;
     }
 
     if (n == 0 || proc->audio_inputs_count == 0 || proc->audio_outputs_count == 0)
@@ -454,31 +560,51 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         return CLAP_PROCESS_CONTINUE;
     }
 
-    /* Process each channel independently through its own NR pipeline.
-     * If the host supplies fewer channels than we have instances (e.g.
-     * a true mono source on a stereo track) only ch 0 is processed. */
     uint32_t proc_ch = (in_ch < out_ch) ? in_ch : out_ch;
     if (proc_ch > 2) proc_ch = 2;
 
     for (uint32_t ch = 0; ch < proc_ch; ++ch) {
         float *src = in_buf->data32[ch];
         float *dst = out_buf->data32[ch];
-        if (!src || !dst) continue;
+
+        /* Passthrough if audio pointers or NR buffer are missing */
+        if (!src || !dst || !self->buf[ch]) {
+            if (src && dst && src != dst) memcpy(dst, src, n * sizeof(float));
+            continue;
+        }
 
         __try {
-            /* float -> double, interleaved real/imag layout expected by NR algorithms.
-             * Odd (imaginary) slots are already zeroed by calloc / previous
-             * NR output writes, so we only need to fill the even slots. */
-            for (uint32_t i = 0; i < n; ++i)
-                self->buf[ch][2 * i] = (double)src[i];
+            /* Load real samples into even slots.  Zero imaginary (odd) slots
+             * explicitly on every call — previous NR output may have written
+             * non-zero values there, which would corrupt the next frame. */
+            for (uint32_t i = 0; i < n; ++i) {
+                self->buf[ch][2 * i]     = (double)src[i];
+                self->buf[ch][2 * i + 1] = 0.0;
+            }
 
-            /* Run all stages — each checks its own run flag */
-            xanr (self->anr[ch],  0);
-            xemnr(self->emnr[ch], 0);
-            xrnnr(self->rnnr[ch], 0);
-            xsbnr(self->sbnr[ch], 0);
+            /* Zero-pad to block_size.  EMNR, RNNR, and SBNR were created
+             * with buff_size = block_size (max_frames at activate time) and
+             * always process that many samples.  When the host delivers a
+             * shorter block (very common — e.g. 128 vs 512), padding prevents
+             * stale data from a previous call being processed, which was the
+             * primary source of digital artefacts. */
+            uint32_t blk = self->block_size;
+            for (uint32_t i = n; i < blk; ++i) {
+                self->buf[ch][2 * i]     = 0.0;
+                self->buf[ch][2 * i + 1] = 0.0;
+            }
 
-            /* double -> float: read back real (even) slots only */
+            /* ANR is a sample-by-sample LMS filter: updating buff_size to
+             * the actual frame count is safe and avoids looping over zeros. */
+            if (self->anr[ch]) {
+                self->anr[ch]->buff_size = (int)n;
+                xanr(self->anr[ch], 0);
+            }
+            if (self->emnr[ch]) xemnr(self->emnr[ch], 0);
+            if (self->rnnr[ch]) xrnnr(self->rnnr[ch], 0);
+            if (self->sbnr[ch]) xsbnr(self->sbnr[ch], 0);
+
+            /* Read back the real (even) output slots only */
             for (uint32_t i = 0; i < n; ++i)
                 dst[i] = (float)self->buf[ch][2 * i];
         }
@@ -489,7 +615,6 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                        (unsigned long)GetExceptionCode(), ch);
                 logged = TRUE;
             }
-            /* Passthrough so the host stays alive */
             if (src != dst) memcpy(dst, src, n * sizeof(float));
         }
     }

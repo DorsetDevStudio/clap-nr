@@ -1,0 +1,65 @@
+# -----------------------------------------------------------------------
+# Build output directories
+# -----------------------------------------------------------------------
+/build/
+/out/
+
+# Build log captured during development
+build_output.txt
+
+# -----------------------------------------------------------------------
+# Temporary / working directories
+# -----------------------------------------------------------------------
+# Temporary CLAP SDK working copy — headers have been copied to include/
+/_clap_tmp/
+
+# -----------------------------------------------------------------------
+# Development / conversation history (not part of the source distribution)
+# -----------------------------------------------------------------------
+CONVERSATION_HISTORY.md
+
+# -----------------------------------------------------------------------
+# CMake generated files at the root (when cmake is run in-source)
+# -----------------------------------------------------------------------
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
+
+# -----------------------------------------------------------------------
+# Visual Studio / MSBuild
+# -----------------------------------------------------------------------
+.vs/
+*.vcxproj.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.sdf
+ipch/
+*.opensdf
+*.tlog
+*.lastbuildstate
+*.recipe
+
+# -----------------------------------------------------------------------
+# Compiled plugin output (build artifacts - not source)
+# -----------------------------------------------------------------------
+*.clap
+*.clap.old
+*.pdb
+*.ilk
+*.map
+
+# Note: libs/**/*.lib  libs/**/*.dll  libs/**/*.def  libs/**/*.exp are
+# intentionally KEPT in the repository — they are pre-built import
+# libraries required to compile and run the plugin on Windows and there
+# is no package-manager source for them in this project.
+
+# -----------------------------------------------------------------------
+# OS-generated junk
+# -----------------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+ehthumbs.db

@@ -1,7 +1,7 @@
 ﻿/*
  * clap_nr.c  -  CLAP plugin incorporating DSP noise-reduction algorithms
  *
- * Copyright (C) 2025  Station Master
+ * Copyright (C) 2026 - Stuart E. Green (G5STU)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -39,7 +39,22 @@
 #include <stdarg.h>
 
 /* System headers required by NR algorithm structs */
-#include <Windows.h>
+#ifdef _WIN32
+#  include <Windows.h>
+#else
+#  include <stdatomic.h>
+#  include <dlfcn.h>
+#  include <unistd.h>
+#  include <limits.h>
+#  include <time.h>
+#  include <sched.h>
+#  ifndef PATH_MAX
+#    define PATH_MAX 4096
+#  endif
+#  ifdef __linux__
+#    include <X11/Xlib.h>   /* XInitThreads() */
+#  endif
+#endif
 #include "fftw3.h"
 #include "rnnoise.h"
 #include <specbleach_adenoiser.h>
@@ -72,7 +87,7 @@
  * --------------------------------------------------------------------- */
 #define PLUGIN_ID      "com.dorsetdevstufio.clap-nr"
 #define PLUGIN_NAME    "CLAP NR"
-#define PLUGIN_VENDOR  "Station Master"
+#define PLUGIN_VENDOR  "Stuart E. Green"
 #define PLUGIN_VERSION CLAP_NR_VERSION_STR
 #define PLUGIN_URL     ""
 
@@ -104,7 +119,7 @@ enum {
 /* -----------------------------------------------------------------------
  * State save/load format  (bump version when layout changes)
  * --------------------------------------------------------------------- */
-#define STATE_VERSION  3U
+#define STATE_VERSION  4U
 
 typedef struct {
     uint32_t version;
@@ -119,6 +134,7 @@ typedef struct {
     int32_t  emnr_ae_run;
     int32_t  nr3_model;       /* new in v2: 0=Standard, 1=Small, 2=Large */
     float    nr3_strength;    /* new in v3: 0.0=bypass, 1.0=full         */
+    uint32_t tooltips_on;     /* new in v4: 1=tips enabled, 0=disabled   */
 } clap_nr_state_t;
 
 /* -----------------------------------------------------------------------
@@ -176,6 +192,7 @@ typedef struct {
     /* ---- GUI ---- */
     clap_nr_gui_t *gui;
     bool           gui_floating;
+    bool           tooltips_on;   /* persisted UI preference */
 
     /* Pending param->host notification (set by GUI, cleared by flush) */
     bool param_dirty[PARAM_COUNT];
@@ -191,14 +208,18 @@ typedef struct {
     /* True between a successful activate() and the subsequent deactivate().
      * process() checks this flag and does passthrough if false, guarding
      * against hosts that call process() outside the active_state window. */
-    bool active;
+    volatile bool active;
 
     /* Incremented by process() on entry, decremented on exit.  deactivate()
      * spins on this reaching zero before returning, guaranteeing that
      * plugin_destroy() will never run concurrently with process().  This is
      * the only safe way to allow destroy_emnr() (which calls
      * fftw_destroy_plan()) to run without racing the audio thread. */
-    volatile LONG process_depth;
+#ifdef _WIN32
+    volatile LONG       process_depth;
+#else
+    _Atomic int         process_depth;
+#endif
 } clap_nr_t;
 
 /* -----------------------------------------------------------------------
@@ -362,6 +383,7 @@ static void apply_nr3_model(clap_nr_t *self)
         RNNRloadModel(NULL);
         return;
     }
+#ifdef _WIN32
     char path[MAX_PATH];
     HMODULE hmod = GetModuleHandleA("clap-nr.clap");
     if (!hmod || !GetModuleFileNameA(hmod, path, MAX_PATH)) {
@@ -369,6 +391,18 @@ static void apply_nr3_model(clap_nr_t *self)
         return;
     }
     char *slash = strrchr(path, '\\');
+    if (!slash) slash = strrchr(path, '/');
+#else
+    char path[PATH_MAX];
+    Dl_info di;
+    if (!dladdr((void *)apply_nr3_model, &di) || !di.dli_fname) {
+        RNNRloadModel(NULL);
+        return;
+    }
+    strncpy(path, di.dli_fname, PATH_MAX - 1);
+    path[PATH_MAX - 1] = '\0';
+    char *slash = strrchr(path, '/');
+#endif
     if (!slash) { RNNRloadModel(NULL); return; }
     *(slash + 1) = '\0';
     const char *fname = (self->nr3_model == 1)
@@ -376,7 +410,11 @@ static void apply_nr3_model(clap_nr_t *self)
                         : "rnnoise_weights_large.bin";
     size_t dlen = strlen(path);
     size_t flen = strlen(fname);
+#ifdef _WIN32
     if (dlen + flen < MAX_PATH)
+#else
+    if (dlen + flen < PATH_MAX)
+#endif
         memcpy(path + dlen, fname, flen + 1);
     else {
         RNNRloadModel(NULL);
@@ -446,6 +484,17 @@ static void on_gui_param_change(void *plugin_ptr, clap_id param_id, double value
     if (hp) hp->request_flush(self->host);
 }
 
+static void on_gui_tooltips_change(void *plugin_ptr, bool tooltips_on)
+{
+    clap_nr_t *self   = (clap_nr_t *)plugin_ptr;
+    self->tooltips_on = tooltips_on;
+
+    /* Notify the host that our state has changed so it will re-save it. */
+    const clap_host_state_t *hs =
+        (const clap_host_state_t *)self->host->get_extension(self->host, CLAP_EXT_STATE);
+    if (hs) hs->mark_dirty(self->host);
+}
+
 /* -----------------------------------------------------------------------
  * Plugin vtable
  * --------------------------------------------------------------------- */
@@ -461,23 +510,53 @@ static void plugin_destroy(const clap_plugin_t *p)
      * which would cause FFTW to call abort() and kill the host process.
      * When deactivate() was already called this drain returns instantly. */
     self->active = false;
+
+    /* Drain with timeout.  If the audio thread is stuck (e.g. an exception
+     * escaped process() and was swallowed by the host callback frame without
+     * decrementing process_depth), spinning forever would block the host's
+     * shutdown watchdog.  After 2 s we give up and leak the DSP objects rather
+     * than calling fftw_destroy_plan() concurrently with fftw_execute(). */
+#ifdef _WIN32
     MemoryBarrier();
-    while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
-        Sleep(0);
+    {
+        int budget = 2000;
+        while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0) {
+            Sleep(1);
+            if (--budget <= 0) {
+                nr_log("plugin_destroy: timed out waiting for audio thread -- "
+                       "leaking DSP objects to avoid FFTW abort()");
+                if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
+                free(self);
+                return;
+            }
+        }
+    }
+#else
+    atomic_thread_fence(memory_order_seq_cst);
+    {
+        int budget = 2000;
+        while (atomic_load(&self->process_depth) != 0) {
+            struct timespec ts = { 0, 1000000L }; /* 1 ms */
+            nanosleep(&ts, NULL);
+            if (--budget <= 0) {
+                nr_log("plugin_destroy: timed out waiting for audio thread -- "
+                       "leaking DSP objects to avoid crash");
+                if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
+                free(self);
+                return;
+            }
+        }
+    }
+#endif
 
     if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
 
-    __try {
-        for (int ch = 0; ch < 2; ++ch) {
-            if (self->anr[ch])  { destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
-            if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
-            if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
-            if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
-            free(self->buf[ch]); self->buf[ch] = NULL;
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        nr_log("destroy: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
+    for (int ch = 0; ch < 2; ++ch) {
+        if (self->anr[ch])  { destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
+        if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
+        if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
+        if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
+        free(self->buf[ch]); self->buf[ch] = NULL;
     }
 
     free(self);
@@ -488,12 +567,21 @@ static void plugin_destroy(const clap_plugin_t *p)
  * --------------------------------------------------------------------- */
 static void nr_log(const char *fmt, ...)
 {
+#ifdef _WIN32
     char path[MAX_PATH];
     DWORD n = GetTempPathA(MAX_PATH, path);
     if (n == 0 || n >= MAX_PATH) return;
     strncat_s(path, MAX_PATH, "clap-nr.log", _TRUNCATE);
     FILE *f = NULL;
     if (fopen_s(&f, path, "a") != 0 || !f) return;
+#else
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/clap-nr.log", tmp);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+#endif
     va_list ap;
     va_start(ap, fmt);
     vfprintf(f, fmt, ap);
@@ -509,7 +597,9 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
     (void)min_frames;
 
     bool ok = false;
+#ifdef _WIN32
     __try {
+#endif
         if (self->buf[0] == NULL) {
             /* ---- First activation: allocate buffers and create NR instances ---- */
             self->sample_rate = sr;
@@ -517,7 +607,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
 
             for (int ch = 0; ch < 2; ++ch) {
                 self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
-                if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); __leave; }
+                if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); goto activate_done; }
 
                 nr_log("activate: creating ANR ch=%d sr=%.0f frames=%u", ch, sr, max_frames);
                 self->anr[ch]  = create_anr(0, 0, (int)max_frames,
@@ -566,7 +656,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                     nr_log("activate: create_* returned NULL ch=%d anr=%p emnr=%p rnnr=%p sbnr=%p",
                            ch, (void*)self->anr[ch], (void*)self->emnr[ch],
                            (void*)self->rnnr[ch], (void*)self->sbnr[ch]);
-                    __leave;
+                    goto activate_done;
                 }
             }
         } else {
@@ -590,7 +680,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 for (int ch = 0; ch < 2; ++ch) {
                     free(self->buf[ch]);
                     self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
-                    if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); __leave; }
+                    if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); goto activate_done; }
 
                     if (self->anr[ch]) {
                         setSize_anr   (self->anr[ch],  (int)max_frames);
@@ -664,6 +754,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
         apply_nr_mode(self, self->nr_mode);
         nr_log("activate: success mode=%d", self->nr_mode);
         ok = true;
+#ifdef _WIN32
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         nr_log("activate: SEH exception 0x%08lX -- NR disabled",
@@ -676,7 +767,8 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
         self->nr_mode = 0;
         ok = true;
     }
-
+#endif /* _WIN32 */
+activate_done:
     if (ok) self->active = true;
     return ok;
 }
@@ -699,20 +791,54 @@ static void plugin_deactivate(const clap_plugin_t *p)
      * By waiting here for process_depth to hit zero we guarantee that no
      * process() call is in flight before control returns to the host.  The
      * wait is bounded by one audio buffer (typically 1-10 ms) so it does
-     * not block the UI perceptibly. */
+     * not block the UI perceptibly.
+     *
+     * Sleep(1) is used rather than Sleep(0): Sleep(0) only yields to threads
+     * of equal or higher priority.  Because audio threads typically run at
+     * THREAD_PRIORITY_TIME_CRITICAL (above the main thread), Sleep(0) from
+     * the main thread will not yield to the audio thread, turning the spin
+     * into a busy-wait that delays the audio thread completing its buffer
+     * and decrementing process_depth.  Sleep(1) explicitly yields for one
+     * scheduler timeslice, allowing the audio thread to run. */
+#ifdef _WIN32
+    MemoryBarrier();
     while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
-        Sleep(0);
+        Sleep(1);
+#else
+    atomic_thread_fence(memory_order_seq_cst);
+    while (atomic_load(&self->process_depth) != 0)
+        sched_yield();
+#endif
 }
 
-static bool plugin_start_processing(const clap_plugin_t *p) { (void)p; return true; }
-static void plugin_stop_processing (const clap_plugin_t *p) { (void)p; }
+static bool plugin_start_processing(const clap_plugin_t *p)
+{
+    clap_nr_t *self = (clap_nr_t *)p;
+    /* Re-enable DSP after a stop/start cycle.  Activate() set this to true
+     * initially; stop_processing() cleared it; we restore it here so that
+     * process() does real work again rather than passing audio through. */
+    self->active = true;
+    return true;
+}
+
+static void plugin_stop_processing(const clap_plugin_t *p)
+{
+    clap_nr_t *self = (clap_nr_t *)p;
+    /* Called on the audio thread after the last process() call in this
+     * processing session.  Clearing active means any process() call that
+     * a non-compliant host fires between here and deactivate() will
+     * passthrough without touching FFTW, RNNoise, or specbleach.  The
+     * deactivate() drain-spin will then exit immediately (depth is already
+     * 0 because this is called after the last process() returned). */
+    self->active = false;
+}
 
 static void plugin_reset(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
     /* Flush algorithm internal state so a transport jump or plugin
      * re-insertion starts clean without residual filter history. */
-    __try {
+    {
         for (int ch = 0; ch < 2; ++ch) {
             if (self->anr[ch])  flush_anr(self->anr[ch]);
             if (self->emnr[ch]) {
@@ -738,9 +864,6 @@ static void plugin_reset(const clap_plugin_t *p)
             memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        nr_log("reset: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
-    }
 }
 
 static clap_process_status plugin_process(const clap_plugin_t *p, const clap_process_t *proc)
@@ -748,7 +871,11 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     clap_nr_t *self = (clap_nr_t *)p;
 
     /* Register this call so deactivate() can wait for us to finish. */
+#ifdef _WIN32
     InterlockedIncrement(&self->process_depth);
+#else
+    atomic_fetch_add(&self->process_depth, 1);
+#endif
 
     /* Guard: passthrough if deactivate() has already been called or activate()
      * has never been called.  Handles hosts that call process() outside the
@@ -765,7 +892,11 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 if (src && dst && src != dst) memcpy(dst, src, nc * sizeof(float));
             }
         }
+#ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
+#else
+        atomic_fetch_sub(&self->process_depth, 1);
+#endif
         return CLAP_PROCESS_CONTINUE;
     }
 
@@ -793,14 +924,21 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             /* Model loading is file I/O -- must not happen on the audio thread.
              * Request a main-thread callback; plugin_on_main_thread will call
              * apply_nr3_model() there.  Keep nr3_model_dirty set so the callback
-             * handler knows work is pending. */
-            self->host->request_callback(self->host);
+             * handler knows work is pending.
+             * Guard with active: if deactivate/stop_processing already cleared
+             * the flag, calling back into the host during teardown can crash. */
+            if (self->active)
+                self->host->request_callback(self->host);
         }
         self->params_dirty = false;
     }
 
     if (n == 0 || proc->audio_inputs_count == 0 || proc->audio_outputs_count == 0) {
+#ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
+#else
+        atomic_fetch_sub(&self->process_depth, 1);
+#endif
         return CLAP_PROCESS_CONTINUE;
     }
 
@@ -818,13 +956,31 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             if (src && dst && src != dst)
                 memcpy(dst, src, n * sizeof(float));
         }
+#ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
+#else
+        atomic_fetch_sub(&self->process_depth, 1);
+#endif
         return CLAP_PROCESS_CONTINUE;
     }
 
     uint32_t proc_ch = (in_ch < out_ch) ? in_ch : out_ch;
     if (proc_ch > 2) proc_ch = 2;
 
+    /* Guard the entire per-channel DSP block with SEH (Windows only).
+     * If any NR algorithm (fftw_execute, rnnoise_process_frame, xsbnr, ...)
+     * throws a structured exception:
+     *   - The __except handler disables NR and passthroughs the audio so the
+     *     host stream is not silenced.
+     *   - Execution falls through to the InterlockedDecrement BELOW the block,
+     *     which is what was missing when the original SEH was removed during
+     *     the cross-platform port.  Without this, any exception escaping
+     *     process() leaves process_depth permanently stuck at 1, causing
+     *     deactivate()/destroy() to spin forever until the host watchdog kills
+     *     the process. */
+#ifdef _WIN32
+    __try {
+#endif
     for (uint32_t ch = 0; ch < proc_ch; ++ch) {
         float *src = in_buf->data32[ch];
         float *dst = out_buf->data32[ch];
@@ -835,7 +991,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             continue;
         }
 
-        __try {
+        {
             /* Load real samples into even slots.  Zero imaginary (odd) slots
              * explicitly on every call — previous NR output may have written
              * non-zero values there, which would corrupt the next frame. */
@@ -930,9 +1086,9 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                     if (*in_count == 480) {
                         /* Full 480-sample frame: call RNNoise directly.
                          * Lock cs so RNNRloadModel can safely swap st. */
-                        EnterCriticalSection(&self->rnnr[ch]->cs);
+                        NR_MUTEX_LOCK(self->rnnr[ch]->cs);
                         rnnoise_process_frame(self->rnnr[ch]->st, outbuf, inbuf);
-                        LeaveCriticalSection(&self->rnnr[ch]->cs);
+                        NR_MUTEX_UNLOCK(self->rnnr[ch]->cs);
                         if (self->nr3_strength < 1.0f) {
                             float s = self->nr3_strength;
                             float t = 1.0f - s;
@@ -968,18 +1124,31 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             for (uint32_t i = 0; i < n; ++i)
                 dst[i] = (float)self->buf[ch][2 * i];
         }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            static BOOL logged = FALSE;
-            if (!logged) {
-                nr_log("process: SEH exception 0x%08lX ch=%u -- bypassing",
-                       (unsigned long)GetExceptionCode(), ch);
-                logged = TRUE;
-            }
-            if (src != dst) memcpy(dst, src, n * sizeof(float));
+    }
+#ifdef _WIN32
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        nr_log("process: SEH 0x%08lX escaped DSP -- disabling NR, passthroughing",
+               (unsigned long)GetExceptionCode());
+        self->nr_mode    = 0;
+        self->params_dirty = true;
+        /* Overwrite any partial DSP output with clean passthrough audio. */
+        if (proc->audio_inputs_count > 0 && proc->audio_outputs_count > 0) {
+            const clap_audio_buffer_t *ib2 = &proc->audio_inputs[0];
+            const clap_audio_buffer_t *ob2 = &proc->audio_outputs[0];
+            uint32_t cc = (ib2->channel_count < ob2->channel_count)
+                         ? ib2->channel_count : ob2->channel_count;
+            for (uint32_t c = 0; c < cc; ++c)
+                if (ib2->data32[c] && ob2->data32[c])
+                    memcpy(ob2->data32[c], ib2->data32[c], n * sizeof(float));
         }
     }
+#endif
 
+#ifdef _WIN32
     InterlockedDecrement(&self->process_depth);
+#else
+    atomic_fetch_sub(&self->process_depth, 1);
+#endif
     return CLAP_PROCESS_CONTINUE;
 }
 
@@ -1068,7 +1237,7 @@ static bool params_get_info(const clap_plugin_t *p, uint32_t idx, clap_param_inf
         info->flags = CLAP_PARAM_IS_AUTOMATABLE;
         snprintf(info->name,   sizeof(info->name),   "NR3 Suppression");
         snprintf(info->module, sizeof(info->module), "NR3");
-        info->min_value = 0.0; info->max_value = 1.0; info->default_value = 1.0;
+        info->min_value = 0.0; info->max_value = 1.0; info->default_value = 0.5;
         return true;
     default: return false;
     }
@@ -1226,6 +1395,7 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *stream)
     s.emnr_ae_run       = self->emnr_ae_run;
     s.nr3_model         = self->nr3_model;
     s.nr3_strength      = self->nr3_strength;
+    s.tooltips_on       = self->tooltips_on ? 1u : 0u;
     return stream->write(stream, &s, sizeof(s)) == (int64_t)sizeof(s);
 }
 
@@ -1238,13 +1408,15 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     /* Minimum bytes for each version:
      *   v1 = 52 bytes  (no nr3_model)
      *   v2 = 56 bytes  (adds nr3_model)
-     *   v3 = 60 bytes  (adds nr3_strength) */
+     *   v3 = 60 bytes  (adds nr3_strength)
+     *   v4 = 64 bytes  (adds tooltips_on) */
     if (got < (int64_t)sizeof(uint32_t)) return false;
     uint32_t min_bytes;
     switch (s.version) {
     case 1U: min_bytes = 52; break;
     case 2U: min_bytes = 56; break;
     case 3U: min_bytes = 60; break;
+    case 4U: min_bytes = 64; break;
     default: return false;
     }
     if (got < (int64_t)min_bytes) return false;
@@ -1269,6 +1441,9 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
         ? ((s.nr3_strength >= 0.0f && s.nr3_strength <= 1.0f) ? s.nr3_strength : 1.0f)
         : 1.0f;
 
+    /* tooltips_on: from v4 onwards; default on for older states */
+    self->tooltips_on = (s.version >= 4U) ? (s.tooltips_on != 0u) : true;
+
     apply_nr_mode(self, (s.nr_mode >= 0 && s.nr_mode <= 4) ? s.nr_mode : 0);
     apply_anr_params(self);
     apply_emnr_params(self);
@@ -1285,6 +1460,7 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
         gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
         gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
         gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
+        gui_set_tooltips(self->gui, self->tooltips_on);
     }
     return true;
 }
@@ -1299,9 +1475,18 @@ static const clap_plugin_state_t s_state = {
  * --------------------------------------------------------------------- */
 static bool gui_is_api_supported(const clap_plugin_t *p, const char *api, bool is_floating)
 {
-    (void)p; (void)is_floating;
+    (void)p;
 #ifdef _WIN32
-    return strcmp(api, CLAP_WINDOW_API_WIN32) == 0;
+    /* Embedded (WS_CHILD) only.  Returning false for floating causes hosts
+     * that probe floating first to fall back to embedded mode, where they
+     * create a native parent window (e.g. a QDialog with transientParent
+     * set to the host's main window), embed our WS_CHILD window into it,
+     * and manage the title and window-manager relationship themselves.  That
+     * parent relationship is what makes our window minimise with the host
+     * and inherit the host's title prefix (e.g. "Station Master Pro | ").
+     * A plugin-owned floating window has no owner HWND, so Windows never
+     * minimises it in response to the host minimising. */
+    return strcmp(api, CLAP_WINDOW_API_WIN32) == 0 && !is_floating;
 #else
     return false;
 #endif
@@ -1312,7 +1497,21 @@ static bool gui_get_preferred_api(const clap_plugin_t *p, const char **api, bool
     (void)p;
 #ifdef _WIN32
     *api = CLAP_WINDOW_API_WIN32;
+    /* Prefer embedded.  The host creates a native window (e.g. QDialog)
+     * with its main window as the OS owner/parent, embeds our WS_CHILD
+     * control into it, and sets the title itself.  That gives us
+     * minimize-with-host and the host's own title prefix for free.
+     * is_api_supported returns false for floating so hosts that probe
+     * floating first skip it and land here. */
     *is_floating = false;
+    return true;
+#elif defined(__linux__)
+    *api = CLAP_WINDOW_API_X11;
+    *is_floating = true;   /* GLFW floating window, no parent embedding */
+    return true;
+#elif defined(__APPLE__)
+    *api = CLAP_WINDOW_API_COCOA;
+    *is_floating = true;
     return true;
 #else
     (void)api; (void)is_floating;
@@ -1326,8 +1525,32 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
     (void)api;
     if (self->gui) return true;
     self->gui_floating = is_floating;
-    self->gui = gui_create(self, on_gui_param_change);
-    return self->gui != NULL;
+    char gui_title[256];
+    const char *host_name = (self->host && self->host->name && self->host->name[0])
+                            ? self->host->name : NULL;
+    if (host_name)
+        snprintf(gui_title, sizeof(gui_title), "%s  |  " PLUGIN_NAME, host_name);
+    else
+        snprintf(gui_title, sizeof(gui_title), "%s", PLUGIN_NAME);
+    self->gui = gui_create(self, on_gui_param_change, on_gui_tooltips_change, gui_title);
+    if (!self->gui) return false;
+
+    /* Sync the plugin's current parameter state to the freshly-created GUI.
+     * This is necessary because state_load skips gui_set_param when the GUI
+     * does not yet exist (it is created later by the host). */
+    gui_set_param(self->gui, PARAM_NR_MODE,          (double)self->nr_mode);
+    gui_set_param(self->gui, PARAM_NR4_REDUCTION,    (double)self->nr4_reduction);
+    gui_set_param(self->gui, PARAM_ANR_TAPS,         (double)self->anr_taps);
+    gui_set_param(self->gui, PARAM_ANR_DELAY,        (double)self->anr_delay);
+    gui_set_param(self->gui, PARAM_ANR_GAIN,         self->anr_gain);
+    gui_set_param(self->gui, PARAM_ANR_LEAKAGE,      self->anr_leakage);
+    gui_set_param(self->gui, PARAM_EMNR_GAIN_METHOD, (double)self->emnr_gain_method);
+    gui_set_param(self->gui, PARAM_EMNR_NPE_METHOD,  (double)self->emnr_npe_method);
+    gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
+    gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
+    gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
+    gui_set_tooltips(self->gui, self->tooltips_on);
+    return true;
 }
 
 static void gui_plugin_destroy(const clap_plugin_t *p)
@@ -1381,14 +1604,18 @@ static bool gui_plugin_set_parent(const clap_plugin_t *p, const clap_window_t *w
     return gui_set_parent(self->gui, window);
 }
 
-static bool gui_set_transient(const clap_plugin_t *p, const clap_window_t *w)
+static bool gui_plugin_set_transient(const clap_plugin_t *p, const clap_window_t *w)
 {
-    (void)p; (void)w; return false;
+    clap_nr_t *self = (clap_nr_t *)p;
+    if (!self->gui) return false;
+    return gui_set_transient(self->gui, w);
 }
 
-static void gui_suggest_title(const clap_plugin_t *p, const char *title)
+static void gui_plugin_suggest_title(const clap_plugin_t *p, const char *title)
 {
-    (void)p; (void)title;
+    clap_nr_t *self = (clap_nr_t *)p;
+    if (!self->gui) return;
+    gui_suggest_title(self->gui, title);
 }
 
 static bool gui_plugin_show(const clap_plugin_t *p)
@@ -1426,8 +1653,8 @@ static const clap_plugin_gui_t s_gui = {
     .adjust_size       = gui_adjust_size,
     .set_size          = gui_set_size,
     .set_parent        = gui_plugin_set_parent,
-    .set_transient     = gui_set_transient,
-    .suggest_title     = gui_suggest_title,
+    .set_transient     = gui_plugin_set_transient,
+    .suggest_title     = gui_plugin_suggest_title,
     .show              = gui_plugin_show,
     .hide              = gui_plugin_hide,
 };
@@ -1553,7 +1780,8 @@ static const clap_plugin_t *factory_create_plugin(const clap_plugin_factory_t *f
     self->emnr_gain_method  = 2;   /* MM-LSA */
     self->emnr_npe_method   = 0;   /* OSMS   */
     self->emnr_ae_run       = 1;
-    self->nr3_strength      = 1.0f;
+    self->nr3_strength      = 0.5f;
+    self->tooltips_on       = true;
 
     return pl;
 }
@@ -1573,18 +1801,19 @@ static bool entry_init(const char *path)
      * the delay-loaded imports resolve correctly regardless of whatever
      * DLL search path the host has configured.  This must happen before
      * any NR algorithm code runs (which uses fftw / rnnoise / specbleach). */
+#ifdef _WIN32
+    /* Pre-load companion DLLs from the plugin's own directory so that
+     * the delay-loaded imports resolve correctly regardless of whatever
+     * DLL search path the host has configured. */
     if (path && *path) {
         char dir[MAX_PATH];
         strncpy(dir, path, MAX_PATH - 1);
         dir[MAX_PATH - 1] = '\0';
-        /* Strip filename, keep trailing backslash */
         char *sep = strrchr(dir, '\\');
         if (!sep) sep = strrchr(dir, '/');
         if (sep) {
             *(sep + 1) = '\0';
             static const char *deps[] = {
-                /* libfftw3f-3 must be loaded before specbleach.dll because
-                 * specbleach imports it as a direct dependency. */
                 "libfftw3-3.dll", "libfftw3f-3.dll", "rnnoise.dll", "specbleach.dll", NULL
             };
             char dll_path[MAX_PATH];
@@ -1594,6 +1823,15 @@ static bool entry_init(const char *path)
             }
         }
     }
+#else
+    (void)path;  /* Unix: shared-library dependencies resolved by the dynamic linker */
+#  ifdef __linux__
+    /* XInitThreads() must be the very first Xlib call in the process.  Call
+     * it here on the main thread, before any host or plugin code touches X11.
+     * This is idempotent if the host has already called it. */
+    XInitThreads();
+#  endif
+#endif
     return true;
 }
 static void  entry_deinit(void) {}

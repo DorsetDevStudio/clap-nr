@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# install-mac.sh  --  install clap-nr.clap on macOS (Apple Silicon / arm64)
+#
+# Usage:
+#   ./install-mac.sh              # install to ~/Library/Audio/Plug-Ins/CLAP/  (per-user)
+#   ./install-mac.sh --system     # install to /Library/Audio/Plug-Ins/CLAP/   (requires sudo)
+#   ./install-mac.sh --uninstall  # remove from ~/Library/Audio/Plug-Ins/CLAP/
+#   ./install-mac.sh --system --uninstall
+#
+# Standard CLAP search paths on macOS (per CLAP spec):
+#   ~/Library/Audio/Plug-Ins/CLAP/    per-user   (no sudo)
+#   /Library/Audio/Plug-Ins/CLAP/     system      (sudo)
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_NAME="clap-nr.clap"
+PLUGIN_SRC="$SCRIPT_DIR/build-mac/$PLUGIN_NAME"
+
+USER_DEST="$HOME/Library/Audio/Plug-Ins/CLAP"
+SYSTEM_DEST="/Library/Audio/Plug-Ins/CLAP"
+
+# -- Parse arguments -----------------------------------------------------------
+SYSTEM=false
+UNINSTALL=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --system)    SYSTEM=true ;;
+        --uninstall) UNINSTALL=true ;;
+        --help|-h)
+            echo "Usage: $0 [--system] [--uninstall]"
+            echo ""
+            echo "  (no flags)   Install to ~/Library/Audio/Plug-Ins/CLAP/  (per-user, no sudo)"
+            echo "  --system     Install to /Library/Audio/Plug-Ins/CLAP/   (system-wide, sudo)"
+            echo "  --uninstall  Remove the plugin instead of installing"
+            exit 0 ;;
+        *) echo "Unknown argument: $arg"; exit 1 ;;
+    esac
+done
+
+# -- Choose destination --------------------------------------------------------
+if [[ "$SYSTEM" == true ]]; then
+    DEST="$SYSTEM_DEST"
+    if [[ "$EUID" -ne 0 ]]; then
+        echo "ERROR: System-wide install requires sudo."
+        echo "Run:  sudo $0 --system"
+        exit 1
+    fi
+else
+    DEST="$USER_DEST"
+fi
+
+# -- Uninstall path ------------------------------------------------------------
+if [[ "$UNINSTALL" == true ]]; then
+    TARGET="$DEST/$PLUGIN_NAME"
+    if [[ -f "$TARGET" ]]; then
+        rm -f "$TARGET"
+        echo "Removed: $TARGET"
+    else
+        echo "Not installed at $TARGET -- nothing to remove."
+    fi
+    exit 0
+fi
+
+# -- Check the plugin has been built -------------------------------------------
+if [[ ! -f "$PLUGIN_SRC" ]]; then
+    echo "ERROR: $PLUGIN_SRC not found."
+    echo "Build first with:  ./build-mac.sh"
+    exit 1
+fi
+
+# -- Install -------------------------------------------------------------------
+mkdir -p "$DEST"
+cp "$PLUGIN_SRC" "$DEST/$PLUGIN_NAME"
+echo "Installed: $DEST/$PLUGIN_NAME"
+echo ""
+echo "You can now load the plugin in your CLAP host."
+echo "If your host was already open, restart it to pick up the new version."

@@ -1,21 +1,23 @@
 cmake_minimum_required(VERSION 3.20)
 project(clap-nr
     VERSION 1.0.0
-    LANGUAGES C
+    LANGUAGES C CXX
 )
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 # -----------------------------------------------------------------------
-# Paths to bundled libraries
+# Paths to bundled libraries (used on Windows; Unix uses system packages)
 # -----------------------------------------------------------------------
-set(FFTW_DIR      "${CMAKE_SOURCE_DIR}/libs/fftw")
-set(RNNOISE_DIR   "${CMAKE_SOURCE_DIR}/libs/rnnoise")
+set(FFTW_DIR       "${CMAKE_SOURCE_DIR}/libs/fftw")
+set(RNNOISE_DIR    "${CMAKE_SOURCE_DIR}/libs/rnnoise")
 set(SPECBLEACH_DIR "${CMAKE_SOURCE_DIR}/libs/specbleach")
-set(CLAP_INCLUDE  "${CMAKE_SOURCE_DIR}/include")
+set(CLAP_INCLUDE   "${CMAKE_SOURCE_DIR}/include")
+set(IMGUI_DIR      "${CMAKE_SOURCE_DIR}/libs/imgui")
 
 # -----------------------------------------------------------------------
-# NR DSP source files
+# NR DSP source files  (platform-agnostic)
 # -----------------------------------------------------------------------
 set(NR_SOURCES
     src/nr/anr.c
@@ -28,38 +30,76 @@ set(NR_SOURCES
 )
 
 # -----------------------------------------------------------------------
-# CLAP plugin entry-point + platform GUI
+# Dear ImGui source files  (core, shared across all platforms)
+# -----------------------------------------------------------------------
+set(IMGUI_CORE_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+)
+
+if(WIN32)
+    # Windows: Win32 platform layer + DirectX 11 renderer
+    list(APPEND IMGUI_SOURCES
+        ${IMGUI_CORE_SOURCES}
+        ${IMGUI_DIR}/imgui_impl_win32.cpp
+        ${IMGUI_DIR}/imgui_impl_dx11.cpp
+    )
+elseif(APPLE)
+    # macOS: GLFW platform layer + OpenGL 3.3 renderer (same as Linux)
+    list(APPEND IMGUI_SOURCES
+        ${IMGUI_CORE_SOURCES}
+        ${IMGUI_DIR}/imgui_impl_glfw.cpp
+        ${IMGUI_DIR}/imgui_impl_opengl3.cpp
+    )
+else()
+    # Linux: GLFW platform layer + OpenGL 3 renderer
+    list(APPEND IMGUI_SOURCES
+        ${IMGUI_CORE_SOURCES}
+        ${IMGUI_DIR}/imgui_impl_glfw.cpp
+        ${IMGUI_DIR}/imgui_impl_opengl3.cpp
+    )
+endif()
+
+# -----------------------------------------------------------------------
+# CLAP plugin entry-point + GUI
 # -----------------------------------------------------------------------
 set(PLUGIN_SOURCES
     src/clap_nr.c
-    src/gui_win32.c
+    src/gui_imgui.cpp
+    ${IMGUI_SOURCES}
 )
 
 # -----------------------------------------------------------------------
-# Build the plugin as a shared library (.clap is just a renamed .dll)
+# Build the plugin as a shared library (.clap on all platforms)
 # -----------------------------------------------------------------------
 add_library(clap-nr SHARED ${NR_SOURCES} ${PLUGIN_SOURCES})
 
-# Headers
+# Common headers
 target_include_directories(clap-nr PRIVATE
     src
     src/nr
-    ${FFTW_DIR}
-    ${RNNOISE_DIR}
-    ${SPECBLEACH_DIR}
     ${CLAP_INCLUDE}
+    ${IMGUI_DIR}
 )
 
-# Import libraries
-target_link_libraries(clap-nr PRIVATE
-    "${FFTW_DIR}/libfftw3-3.lib"
-    "${RNNOISE_DIR}/rnnoise.lib"
-    "${SPECBLEACH_DIR}/specbleach.lib"
-)
-
-# Windows-specific
+# -----------------------------------------------------------------------
+# Platform-specific configuration
+# -----------------------------------------------------------------------
 if(WIN32)
-    target_link_libraries(clap-nr PRIVATE comctl32 shell32 delayimp)
+    # --- Bundled .lib imports -----------------------------------------------
+    target_include_directories(clap-nr PRIVATE
+        ${FFTW_DIR}
+        ${RNNOISE_DIR}
+        ${SPECBLEACH_DIR}
+    )
+    target_link_libraries(clap-nr PRIVATE
+        "${FFTW_DIR}/libfftw3-3.lib"
+        "${RNNOISE_DIR}/rnnoise.lib"
+        "${SPECBLEACH_DIR}/specbleach.lib"
+        comctl32 shell32 d3d11 dxgi dwmapi delayimp
+    )
     # Delay-load companion DLLs so LoadLibrary(clap-nr.clap) succeeds before
     # entry_init() pre-loads them from the plugin's own directory.
     target_link_options(clap-nr PRIVATE
@@ -68,21 +108,99 @@ if(WIN32)
         /DELAYLOAD:specbleach.dll
     )
     target_compile_definitions(clap-nr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX CLAP_NR_STANDALONE=1)
-    # CLAP plugins are .clap files — just rename the output DLL
+
+elseif(APPLE)
+    # --- macOS: Homebrew libraries + GLFW/OpenGL for GUI -----------------
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFTW3   REQUIRED fftw3)
+    pkg_check_modules(RNNOISE REQUIRED rnnoise)
+    # libspecbleach may not have a pkg-config entry; try find_library fallback
+    find_library(SPECBLEACH_LIB NAMES specbleach REQUIRED)
+    find_package(glfw3   REQUIRED)
+    find_package(OpenGL  REQUIRED)
+
+    target_include_directories(clap-nr PRIVATE
+        ${FFTW3_INCLUDE_DIRS}
+        ${RNNOISE_INCLUDE_DIRS}
+    )
+    target_link_libraries(clap-nr PRIVATE
+        ${FFTW3_LIBRARIES}
+        ${RNNOISE_LIBRARIES}
+        ${SPECBLEACH_LIB}
+        glfw
+        OpenGL::GL
+        pthread
+    )
+    target_compile_definitions(clap-nr PRIVATE CLAP_NR_STANDALONE=1)
+    # Hide all symbols by default; only CLAP_EXPORT entry point is visible
     set_target_properties(clap-nr PROPERTIES
-        OUTPUT_NAME "clap-nr"
-        SUFFIX ".clap"
-        PREFIX ""
+        CXX_VISIBILITY_PRESET hidden
+        C_VISIBILITY_PRESET   hidden
+    )
+
+else()
+    # --- Linux: system libraries via pkg-config -----------------------------
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(FFTW3   REQUIRED fftw3)
+    pkg_check_modules(RNNOISE REQUIRED rnnoise)
+    pkg_check_modules(SPECBLEACH REQUIRED specbleach)
+    find_package(glfw3 REQUIRED)
+    find_package(OpenGL REQUIRED)
+
+    target_include_directories(clap-nr PRIVATE
+        ${FFTW3_INCLUDE_DIRS}
+        ${RNNOISE_INCLUDE_DIRS}
+        ${SPECBLEACH_INCLUDE_DIRS}
+    )
+    target_link_libraries(clap-nr PRIVATE
+        ${FFTW3_LIBRARIES}
+        ${RNNOISE_LIBRARIES}
+        ${SPECBLEACH_LIBRARIES}
+        glfw
+        OpenGL::GL
+        pthread
+        dl
+    )
+    target_compile_definitions(clap-nr PRIVATE CLAP_NR_STANDALONE=1)
+    # Hide all symbols by default; only CLAP_EXPORT entry point is visible
+    set_target_properties(clap-nr PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        C_VISIBILITY_PRESET   hidden
+    )
+    # Embed the RPATH so the plugin finds system .so files when installed
+    set_target_properties(clap-nr PROPERTIES
+        BUILD_RPATH   "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN"
     )
 endif()
 
 # -----------------------------------------------------------------------
-# Install: copy DLL dependencies next to the plugin
+# Plugin output name: clap-nr.clap on all platforms
+# -----------------------------------------------------------------------
+if(APPLE)
+    set_target_properties(clap-nr PROPERTIES
+        OUTPUT_NAME "clap-nr"
+        SUFFIX      ".clap"
+        PREFIX      ""
+    )
+else()
+    set_target_properties(clap-nr PROPERTIES
+        OUTPUT_NAME "clap-nr"
+        SUFFIX      ".clap"
+        PREFIX      ""
+    )
+endif()
+
+# -----------------------------------------------------------------------
+# Install
 # -----------------------------------------------------------------------
 install(TARGETS clap-nr DESTINATION .)
-install(FILES
-    "${FFTW_DIR}/libfftw3-3.dll"
-    "${RNNOISE_DIR}/rnnoise.dll"
-    "${SPECBLEACH_DIR}/specbleach.dll"
-    DESTINATION .
-)
+if(WIN32)
+    install(FILES
+        "${FFTW_DIR}/libfftw3-3.dll"
+        "${RNNOISE_DIR}/rnnoise.dll"
+        "${SPECBLEACH_DIR}/specbleach.dll"
+        DESTINATION .
+    )
+endif()
+

@@ -31,7 +31,7 @@
     a { color: var(--accent); text-decoration: none; }
     a:hover { text-decoration: underline; }
 
-    /* ── Header ───────────────────────────────────────────────── */
+    /* -- Header ------------------------------------------------- */
     header {
       background: linear-gradient(135deg, #12151f 0%, #1c2038 60%, #131928 100%);
       border-bottom: 1px solid var(--border);
@@ -86,7 +86,7 @@
     .btn-primary { background: var(--accent); color: #fff; }
     .btn-secondary { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
 
-    /* ── Layout ───────────────────────────────────────────────── */
+    /* -- Layout ------------------------------------------------- */
     main { max-width: 860px; margin: 0 auto; padding: 0 24px 80px; }
 
     section { margin-top: 64px; }
@@ -111,7 +111,7 @@
     p { margin-bottom: 14px; color: var(--text); }
     p:last-child { margin-bottom: 0; }
 
-    /* ── WIP Banner ───────────────────────────────────────────── */
+    /* -- WIP Banner --------------------------------------------- */
     .wip-banner {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -123,7 +123,7 @@
     }
     .wip-banner strong { font-weight: 600; color: var(--text); }
 
-    /* ── Mode cards ───────────────────────────────────────────── */
+    /* -- Mode cards --------------------------------------------- */
     .mode-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
@@ -160,7 +160,7 @@
       margin-bottom: 0;
     }
 
-    /* ── Table ────────────────────────────────────────────────── */
+    /* -- Table -------------------------------------------------- */
     table {
       width: 100%;
       border-collapse: collapse;
@@ -188,7 +188,7 @@
 
     tr:nth-child(even) td { background: #141720; }
 
-    /* ── Code block ───────────────────────────────────────────── */
+    /* -- Code block --------------------------------------------- */
     pre {
       background: var(--code-bg);
       border: 1px solid var(--border);
@@ -215,7 +215,7 @@
 
     pre code { background: none; border: none; padding: 0; font-size: inherit; }
 
-    /* ── Special Thanks cards ─────────────────────────────────── */
+    /* -- Special Thanks cards ----------------------------------- */
     .thanks-list { display: flex; flex-direction: column; gap: 16px; margin-top: 6px; }
 
     .thanks-card {
@@ -250,7 +250,7 @@
       font-family: "SFMono-Regular", Consolas, monospace;
     }
 
-    /* ── Platform pill ────────────────────────────────────────── */
+    /* -- Platform pill ------------------------------------------ */
     .platform-pill {
       display: inline-block;
       background: var(--surface);
@@ -264,7 +264,7 @@
     }
     .platform-pill.active { border-color: var(--accent2); color: var(--accent2); }
 
-    /* ── Derivative notice ────────────────────────────────────── */
+    /* -- Derivative notice -------------------------------------- */
     .notice {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -274,7 +274,7 @@
       margin-bottom: 14px;
     }
 
-    /* ── Footer ───────────────────────────────────────────────── */
+    /* -- Footer ------------------------------------------------- */
     footer {
       border-top: 1px solid var(--border);
       text-align: center;
@@ -286,7 +286,7 @@
     footer a { color: var(--muted); }
     footer a:hover { color: var(--text); }
 
-    /* ── Responsive ───────────────────────────────────────────── */
+    /* -- Responsive --------------------------------------------- */
     @media (max-width: 520px) {
       header { padding: 44px 16px 40px; }
       .mode-grid { grid-template-columns: 1fr 1fr; }
@@ -295,7 +295,7 @@
 </head>
 <body>
 
-<!-- ── Header ──────────────────────────────────────────────────────── -->
+<!-- -- Header -------------------------------------------------------- -->
 <header>
   <div class="badge">Work in progress</div>
   <h1><span>clap</span>-nr</h1>
@@ -333,7 +333,7 @@
       at the core of this plugin were written by <strong>Warren Pratt (NR0V)</strong>
       and <strong>Richard Samphire (MW0LGE)</strong>.
       Our contribution is the CLAP plugin wrapper, the audio integration layer,
-      and the Win32 user interface. Full attribution is given in the
+      and the cross-platform Dear ImGui user interface. Full attribution is given in the
       <a href="https://github.com/DorsetDevStudio/clap-nr/blob/main/THIRD-PARTY-NOTICES.md">
         THIRD-PARTY-NOTICES</a> file.
     </div>
@@ -438,40 +438,55 @@
     <h2>Platform support</h2>
     <div>
       <span class="platform-pill active">Windows x64 &#10003;</span>
-      <span class="platform-pill">macOS (not yet)</span>
-      <span class="platform-pill">Linux (not yet)</span>
+      <span class="platform-pill active">macOS arm64 &#10003;</span>
+      <span class="platform-pill active">Linux x64 &#10003;</span>
     </div>
     <p style="margin-top: 14px;">
-      Currently Windows x64 only (MSVC or MinGW-w64). Pull requests adding
-      macOS or Linux support are welcome, provided they do not break the
-      existing Windows build.
+      Windows x64, macOS Apple Silicon (arm64), and Linux x64 are all supported.
+      Each platform has a dedicated build and install script in the repository root.
     </p>
   </section>
 
   <!-- Building -->
   <section id="building">
-    <h2>Building from source</h2>
+    <h2>Building and installing from source</h2>
 
-    <h3>Prerequisites</h3>
-    <ul style="padding-left: 22px; margin-bottom: 14px; color: var(--text);">
-      <li>CMake 3.20 or later</li>
-      <li>Visual Studio 2022 (MSVC, x64) <strong>or</strong> MinGW-w64 (x64)</li>
-    </ul>
+    <h3>Windows (x64)</h3>
+    <p>Requires: Git, CMake 3.20+, Visual Studio 2022 with the <strong>Desktop development with C++</strong> workload.</p>
+    <p><strong>Build:</strong></p>
+<pre><code>build-win.bat</code></pre>
+    <p>Output: <code>build\Release\clap-nr.clap</code></p>
+    <p><strong>Install</strong> (run as Administrator):</p>
+<pre><code>install-win.bat</code></pre>
+    <p>Installs to <code>%CommonProgramFiles%\CLAP\</code>. Right-click the script in File Explorer and choose <em>Run as administrator</em>.</p>
+    <p><strong>Uninstall</strong> (run as Administrator):</p>
+<pre><code>uninstall.bat</code></pre>
 
-    <h3>Step 1 - Build</h3>
-<pre><code>cmake -B build -S . -A x64
-cmake --build build --config Release</code></pre>
-    <p>The output is <code>build\Release\clap-nr.clap</code>.</p>
+    <h3>macOS (Apple Silicon, arm64)</h3>
+    <p>Requires: Xcode Command Line Tools, CMake 3.20+.</p>
+<pre><code>xcode-select --install   # one-time, if not already done
+brew install cmake       # or download from cmake.org
 
-    <h3>Step 2 - Install</h3>
-    <p>
-      Copy <code>clap-nr.clap</code> and the three runtime DLLs to your CLAP plugin folder.
-      The required DLLs are already present under <code>libs\</code>:
-    </p>
-<pre><code>copy build\Release\clap-nr.clap  "%COMMONPROGRAMFILES%\CLAP\"
-copy libs\fftw\libfftw3-3.dll    "%COMMONPROGRAMFILES%\CLAP\"
-copy libs\rnnoise\rnnoise.dll    "%COMMONPROGRAMFILES%\CLAP\"
-copy libs\specbleach\specbleach.dll "%COMMONPROGRAMFILES%\CLAP\"</code></pre>
+bash build-mac.sh</code></pre>
+    <p>Output: <code>build-mac/clap-nr.clap</code></p>
+    <p><strong>Install</strong> (user install, no password required):</p>
+<pre><code>bash install-mac.sh</code></pre>
+    <p>Installs to <code>~/Library/Audio/Plug-Ins/CLAP/</code>.</p>
+
+    <h3>Linux (x64)</h3>
+    <p>Requires: GCC/Clang, CMake 3.20+, standard build tools.</p>
+<pre><code># Debian / Ubuntu
+sudo apt install build-essential cmake git
+
+# Fedora / RHEL
+sudo dnf install gcc gcc-c++ cmake git
+
+bash build-linux.sh</code></pre>
+    <p>Output: <code>build-linux/clap-nr.clap</code></p>
+    <p><strong>User install</strong> (no root, installs to <code>~/.clap/</code>):</p>
+<pre><code>bash install-linux.sh</code></pre>
+    <p><strong>System-wide install</strong> (installs to <code>/usr/lib/clap/</code>):</p>
+<pre><code>bash install-linux.sh --system</code></pre>
   </section>
 
   <!-- Licence -->

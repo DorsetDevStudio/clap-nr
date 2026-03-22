@@ -14,11 +14,6 @@ build_output.txt
 /_clap_tmp/
 
 # -----------------------------------------------------------------------
-# Development / conversation history (not part of the source distribution)
-# -----------------------------------------------------------------------
-CONVERSATION_HISTORY.md
-
-# -----------------------------------------------------------------------
 # CMake generated files at the root (when cmake is run in-source)
 # -----------------------------------------------------------------------
 CMakeCache.txt

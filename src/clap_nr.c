@@ -1122,7 +1122,7 @@ static bool params_get_info(const clap_plugin_t *p, uint32_t idx, clap_param_inf
         info->flags = CLAP_PARAM_IS_AUTOMATABLE;
         snprintf(info->name,   sizeof(info->name),   "NR3 Suppression");
         snprintf(info->module, sizeof(info->module), "NR3");
-        info->min_value = 0.0; info->max_value = 1.0; info->default_value = 1.0;
+        info->min_value = 0.0; info->max_value = 1.0; info->default_value = 0.5;
         return true;
     default: return false;
     }
@@ -1396,7 +1396,23 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
     else
         snprintf(gui_title, sizeof(gui_title), "%s", PLUGIN_NAME);
     self->gui = gui_create(self, on_gui_param_change, gui_title);
-    return self->gui != NULL;
+    if (!self->gui) return false;
+
+    /* Sync the plugin's current parameter state to the freshly-created GUI.
+     * This is necessary because state_load skips gui_set_param when the GUI
+     * does not yet exist (it is created later by the host). */
+    gui_set_param(self->gui, PARAM_NR_MODE,          (double)self->nr_mode);
+    gui_set_param(self->gui, PARAM_NR4_REDUCTION,    (double)self->nr4_reduction);
+    gui_set_param(self->gui, PARAM_ANR_TAPS,         (double)self->anr_taps);
+    gui_set_param(self->gui, PARAM_ANR_DELAY,        (double)self->anr_delay);
+    gui_set_param(self->gui, PARAM_ANR_GAIN,         self->anr_gain);
+    gui_set_param(self->gui, PARAM_ANR_LEAKAGE,      self->anr_leakage);
+    gui_set_param(self->gui, PARAM_EMNR_GAIN_METHOD, (double)self->emnr_gain_method);
+    gui_set_param(self->gui, PARAM_EMNR_NPE_METHOD,  (double)self->emnr_npe_method);
+    gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
+    gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
+    gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
+    return true;
 }
 
 static void gui_plugin_destroy(const clap_plugin_t *p)
@@ -1622,7 +1638,7 @@ static const clap_plugin_t *factory_create_plugin(const clap_plugin_factory_t *f
     self->emnr_gain_method  = 2;   /* MM-LSA */
     self->emnr_npe_method   = 0;   /* OSMS   */
     self->emnr_ae_run       = 1;
-    self->nr3_strength      = 1.0f;
+    self->nr3_strength      = 0.5f;
 
     return pl;
 }

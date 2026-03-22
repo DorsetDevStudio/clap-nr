@@ -958,7 +958,7 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
     g->emnr_ae_run      = 1;
     g->nr4_reduction    = 10.0f;
     g->nr3_model        = 0;
-    g->nr3_strength     = 1.0f;
+    g->nr3_strength     = 0.5f;
     g->tooltips_on      = true;
     g->min_w            = GUI_BASE_W;
     g->min_h            = GUI_BASE_H;

@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(clap-nr
     VERSION 1.0.0
-    LANGUAGES C
+    LANGUAGES C CXX
 )
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 # -----------------------------------------------------------------------
 # Paths to bundled libraries
@@ -13,6 +14,7 @@ set(FFTW_DIR      "${CMAKE_SOURCE_DIR}/libs/fftw")
 set(RNNOISE_DIR   "${CMAKE_SOURCE_DIR}/libs/rnnoise")
 set(SPECBLEACH_DIR "${CMAKE_SOURCE_DIR}/libs/specbleach")
 set(CLAP_INCLUDE  "${CMAKE_SOURCE_DIR}/include")
+set(IMGUI_DIR     "${CMAKE_SOURCE_DIR}/libs/imgui")
 
 # -----------------------------------------------------------------------
 # NR DSP source files
@@ -28,11 +30,24 @@ set(NR_SOURCES
 )
 
 # -----------------------------------------------------------------------
-# CLAP plugin entry-point + platform GUI
+# Dear ImGui source files (vendored in libs/imgui)
+# -----------------------------------------------------------------------
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/imgui_impl_win32.cpp
+    ${IMGUI_DIR}/imgui_impl_dx11.cpp
+)
+
+# -----------------------------------------------------------------------
+# CLAP plugin entry-point + ImGui GUI
 # -----------------------------------------------------------------------
 set(PLUGIN_SOURCES
     src/clap_nr.c
-    src/gui_win32.c
+    src/gui_imgui.cpp
+    ${IMGUI_SOURCES}
 )
 
 # -----------------------------------------------------------------------
@@ -48,6 +63,7 @@ target_include_directories(clap-nr PRIVATE
     ${RNNOISE_DIR}
     ${SPECBLEACH_DIR}
     ${CLAP_INCLUDE}
+    ${IMGUI_DIR}
 )
 
 # Import libraries
@@ -59,7 +75,7 @@ target_link_libraries(clap-nr PRIVATE
 
 # Windows-specific
 if(WIN32)
-    target_link_libraries(clap-nr PRIVATE comctl32 shell32 delayimp)
+    target_link_libraries(clap-nr PRIVATE comctl32 shell32 d3d11 dxgi dwmapi delayimp)
     # Delay-load companion DLLs so LoadLibrary(clap-nr.clap) succeeds before
     # entry_init() pre-loads them from the plugin's own directory.
     target_link_options(clap-nr PRIVATE

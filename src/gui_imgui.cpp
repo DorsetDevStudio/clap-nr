@@ -1,0 +1,932 @@
+/*
+ * gui_imgui.cpp  -  Dear ImGui (Win32 + DirectX 11) GUI for clap-nr
+ *
+ * Implements the same gui.h interface as gui_win32.c so that clap_nr.c
+ * requires no changes.  gui_win32.c is kept as a reference / fallback but
+ * is no longer compiled when this file is included in the build.
+ *
+ * Backend decision: Win32 platform layer + DirectX 11 renderer.
+ *   - Both are part of the Windows SDK; no extra DLLs shipped.
+ *   - Easily swapped for OpenGL/Metal/X11 backends on other platforms.
+ *
+ * Threading model:
+ *   All ImGui calls happen on the main thread (the thread that owns the
+ *   window).  The audio thread only writes parameters via handle_param_event;
+ *   gui_set_param() (called from the main thread) pushes values into the
+ *   cached state struct which the render loop reads each frame.
+ */
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <dwmapi.h>
+#include <shellapi.h>
+#include <d3d11.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+/* ImGui core */
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_dx11.h"
+
+/* Plugin headers - included in C++ context, not inside extern "C" */
+#include "gui.h"
+#include "version.h"
+
+/* Forward-declare the ImGui Win32 message handler */
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
+/* -----------------------------------------------------------------------
+ * Param indices  (must stay in sync with clap_nr.c)
+ * --------------------------------------------------------------------- */
+enum {
+    _GUI_PARAM_NR_MODE          = 0,
+    _GUI_PARAM_NR4_REDUCTION    = 1,
+    _GUI_PARAM_ANR_TAPS         = 2,
+    _GUI_PARAM_ANR_DELAY        = 3,
+    _GUI_PARAM_ANR_GAIN         = 4,
+    _GUI_PARAM_ANR_LEAKAGE      = 5,
+    _GUI_PARAM_EMNR_GAIN_METHOD = 6,
+    _GUI_PARAM_EMNR_NPE_METHOD  = 7,
+    _GUI_PARAM_EMNR_AE_RUN      = 8,
+    _GUI_PARAM_NR3_MODEL        = 9,
+    _GUI_PARAM_NR3_STRENGTH     = 10,
+};
+
+/* -----------------------------------------------------------------------
+ * Colours / theme
+ * --------------------------------------------------------------------- */
+static const ImVec4 COL_ACCENT   = {0.36f, 0.55f, 0.93f, 1.00f}; /* blue  */
+static const ImVec4 COL_ACCENT2  = {0.24f, 0.81f, 0.56f, 1.00f}; /* green */
+static const ImVec4 COL_BG       = {0.09f, 0.10f, 0.13f, 1.00f}; /* near-black */
+static const ImVec4 COL_SURFACE  = {0.13f, 0.14f, 0.19f, 1.00f}; /* panel */
+static const ImVec4 COL_BORDER   = {0.20f, 0.21f, 0.27f, 1.00f};
+static const ImVec4 COL_TEXT     = {0.83f, 0.85f, 0.91f, 1.00f};
+static const ImVec4 COL_MUTED    = {0.48f, 0.50f, 0.60f, 1.00f};
+
+static void apply_theme()
+{
+    ImGuiStyle &s = ImGui::GetStyle();
+    s.WindowRounding    = 6.0f;
+    s.ChildRounding     = 4.0f;
+    s.FrameRounding     = 4.0f;
+    s.GrabRounding      = 4.0f;
+    s.PopupRounding     = 4.0f;
+    s.ScrollbarRounding = 4.0f;
+    s.TabRounding       = 4.0f;
+    s.FramePadding      = {8.0f, 4.0f};
+    s.ItemSpacing       = {8.0f, 6.0f};
+    s.WindowPadding     = {12.0f, 10.0f};
+    s.GrabMinSize       = 10.0f;
+    s.ScrollbarSize     = 12.0f;
+    s.WindowBorderSize  = 1.0f;
+    s.ChildBorderSize   = 1.0f;
+    s.FrameBorderSize   = 0.0f;
+
+    ImVec4 *c = s.Colors;
+    c[ImGuiCol_WindowBg]            = COL_BG;
+    c[ImGuiCol_ChildBg]             = COL_SURFACE;
+    c[ImGuiCol_PopupBg]             = COL_SURFACE;
+    c[ImGuiCol_Border]              = COL_BORDER;
+    c[ImGuiCol_Text]                = COL_TEXT;
+    c[ImGuiCol_TextDisabled]        = COL_MUTED;
+    c[ImGuiCol_FrameBg]             = {0.16f, 0.17f, 0.23f, 1.00f};
+    c[ImGuiCol_FrameBgHovered]      = {0.20f, 0.22f, 0.30f, 1.00f};
+    c[ImGuiCol_FrameBgActive]       = {0.24f, 0.26f, 0.36f, 1.00f};
+    c[ImGuiCol_TitleBg]             = {0.07f, 0.08f, 0.11f, 1.00f};
+    c[ImGuiCol_TitleBgActive]       = {0.09f, 0.10f, 0.14f, 1.00f};
+    c[ImGuiCol_Header]              = {0.18f, 0.30f, 0.58f, 0.80f};
+    c[ImGuiCol_HeaderHovered]       = {0.26f, 0.40f, 0.70f, 0.90f};
+    c[ImGuiCol_HeaderActive]        = COL_ACCENT;
+    c[ImGuiCol_Button]              = {0.18f, 0.28f, 0.55f, 0.80f};
+    c[ImGuiCol_ButtonHovered]       = {0.26f, 0.38f, 0.68f, 0.90f};
+    c[ImGuiCol_ButtonActive]        = COL_ACCENT;
+    c[ImGuiCol_SliderGrab]          = COL_ACCENT;
+    c[ImGuiCol_SliderGrabActive]    = {0.50f, 0.70f, 1.00f, 1.00f};
+    c[ImGuiCol_CheckMark]           = COL_ACCENT2;
+    c[ImGuiCol_Separator]           = COL_BORDER;
+    c[ImGuiCol_Tab]                 = {0.12f, 0.14f, 0.20f, 1.00f};
+    c[ImGuiCol_TabHovered]          = {0.26f, 0.38f, 0.68f, 0.90f};
+    c[ImGuiCol_TabActive]           = {0.20f, 0.30f, 0.58f, 1.00f};
+    c[ImGuiCol_ScrollbarBg]         = {0.07f, 0.08f, 0.11f, 1.00f};
+    c[ImGuiCol_ScrollbarGrab]       = {0.22f, 0.24f, 0.32f, 1.00f};
+    c[ImGuiCol_ScrollbarGrabHovered]= {0.30f, 0.33f, 0.44f, 1.00f};
+    c[ImGuiCol_ScrollbarGrabActive] = COL_ACCENT;
+}
+
+/* -----------------------------------------------------------------------
+ * GUI struct
+ * --------------------------------------------------------------------- */
+struct clap_nr_gui_s {
+    /* Ownership */
+    void           *plugin;
+    gui_param_cb_t  on_param_change;
+
+    /* Window / D3D11 */
+    HWND                  hwnd;
+    bool                  embedded;
+    ID3D11Device         *d3d_device;
+    ID3D11DeviceContext  *d3d_ctx;
+    IDXGISwapChain       *swap_chain;
+    ID3D11RenderTargetView *rtv;
+    UINT                  sc_w, sc_h;  /* swapchain dimensions */
+
+    /* Render timer */
+    UINT_PTR              timer_id;
+
+    /* Cached parameter values (written by gui_set_param on main thread,
+     * read by the render loop on the same thread -- no locking needed). */
+    int    nr_mode;
+    int    anr_taps;
+    int    anr_delay;
+    double anr_gain;
+    double anr_leakage;
+    int    emnr_gain_method;
+    int    emnr_npe_method;
+    int    emnr_ae_run;
+    float  nr4_reduction;
+    int    nr3_model;
+    float  nr3_strength;
+
+    /* Prevent feedback when we write to a widget from gui_set_param */
+    bool   updating;
+    bool   tooltips_on;   /* show on-hover tooltips */
+    bool   open_website;  /* deferred ShellExecute after Present() */
+
+    /* Enforced minimum client-area size (updated each frame) */
+    int    min_w;
+    int    min_h;
+
+    /* Floating window title constructed at create time */
+    char   window_title[256];
+};
+
+/* -----------------------------------------------------------------------
+ * Fixed logical size (pre-DPI; scaled by ImGui font/DPI internally)
+ * --------------------------------------------------------------------- */
+#define GUI_BASE_W  580
+#define GUI_BASE_H  230   /* height adapts per-mode at runtime */
+
+/* -----------------------------------------------------------------------
+ * D3D11 helpers
+ * --------------------------------------------------------------------- */
+static bool d3d_create(clap_nr_gui_s *g, HWND hwnd)
+{
+    DXGI_SWAP_CHAIN_DESC sd = {};
+    sd.BufferCount                        = 2;
+    sd.BufferDesc.Width                   = 0;
+    sd.BufferDesc.Height                  = 0;
+    sd.BufferDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.BufferDesc.RefreshRate.Numerator   = 60;
+    sd.BufferDesc.RefreshRate.Denominator = 1;
+    sd.Flags                              = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+    sd.BufferUsage                        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.OutputWindow                       = hwnd;
+    sd.SampleDesc.Count                   = 1;
+    sd.Windowed                           = TRUE;
+    sd.SwapEffect                         = DXGI_SWAP_EFFECT_DISCARD;
+
+    D3D_FEATURE_LEVEL fl;
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+        nullptr, 0, D3D11_SDK_VERSION,
+        &sd, &g->swap_chain, &g->d3d_device, &fl, &g->d3d_ctx);
+    if (FAILED(hr)) return false;
+
+    ID3D11Texture2D *back = nullptr;
+    g->swap_chain->GetBuffer(0, IID_PPV_ARGS(&back));
+    g->d3d_device->CreateRenderTargetView(back, nullptr, &g->rtv);
+    back->Release();
+
+    RECT rc; GetClientRect(hwnd, &rc);
+    g->sc_w = (UINT)(rc.right  - rc.left);
+    g->sc_h = (UINT)(rc.bottom - rc.top);
+    return true;
+}
+
+static void d3d_resize(clap_nr_gui_s *g, UINT w, UINT h)
+{
+    if (g->rtv) { g->rtv->Release(); g->rtv = nullptr; }
+    g->swap_chain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+    ID3D11Texture2D *back = nullptr;
+    g->swap_chain->GetBuffer(0, IID_PPV_ARGS(&back));
+    g->d3d_device->CreateRenderTargetView(back, nullptr, &g->rtv);
+    back->Release();
+    g->sc_w = w; g->sc_h = h;
+}
+
+static void d3d_destroy(clap_nr_gui_s *g)
+{
+    if (g->rtv)        { g->rtv->Release();        g->rtv        = nullptr; }
+    if (g->swap_chain) { g->swap_chain->Release();  g->swap_chain = nullptr; }
+    if (g->d3d_ctx)    { g->d3d_ctx->Release();     g->d3d_ctx    = nullptr; }
+    if (g->d3d_device) { g->d3d_device->Release();  g->d3d_device = nullptr; }
+}
+
+/* -----------------------------------------------------------------------
+ * ImGui helper widgets
+ * --------------------------------------------------------------------- */
+
+/* per-frame tooltip visibility flag (set at top of render_frame) */
+static bool s_show_tooltips = true;
+
+/* Show a wrapped tooltip for the last-drawn widget if tooltips are enabled. */
+static void show_tooltip_text(const char *text)
+{
+    if (!s_show_tooltips || !text) return;
+    if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) return;
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 22.0f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+
+/* Labelled horizontal slider that displays a formatted value.
+ * Returns true when the value changed. */
+static bool param_slider_float(const char *label, const char *tooltip,
+                                float *v, float lo, float hi,
+                                const char *fmt, float width = -1.0f)
+{
+    bool changed = false;
+    ImGui::PushID(label);
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextUnformatted(label);
+    if (tooltip) show_tooltip_text(tooltip);
+    ImGui::TableSetColumnIndex(1);
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    else           ImGui::SetNextItemWidth(-1.0f);
+    changed = ImGui::SliderFloat("##v", v, lo, hi, fmt);
+    if (tooltip) show_tooltip_text(tooltip);
+    ImGui::PopID();
+    return changed;
+}
+
+static bool param_slider_int(const char *label, const char *tooltip,
+                              int *v, int lo, int hi,
+                              const char *fmt = "%d", float width = -1.0f)
+{
+    bool changed = false;
+    ImGui::PushID(label);
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    ImGui::TextUnformatted(label);
+    if (tooltip) show_tooltip_text(tooltip);
+    ImGui::TableSetColumnIndex(1);
+    if (width > 0) ImGui::SetNextItemWidth(width);
+    else           ImGui::SetNextItemWidth(-1.0f);
+    changed = ImGui::SliderInt("##v", v, lo, hi, fmt);
+    if (tooltip) show_tooltip_text(tooltip);
+    ImGui::PopID();
+    return changed;
+}
+
+/* Begin a two-column parameter table (label col | control col) */
+static void begin_param_table(const char *id)
+{
+    ImGui::BeginTable(id, 2,
+        ImGuiTableFlags_None,
+        ImVec2(-1, 0));
+    ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+    ImGui::TableSetupColumn("ctrl",  ImGuiTableColumnFlags_WidthStretch);
+}
+
+/* -----------------------------------------------------------------------
+ * Render one frame of the plugin GUI
+ * --------------------------------------------------------------------- */
+static void render_frame(clap_nr_gui_s *g)
+{
+    s_show_tooltips = g->tooltips_on;
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    /* Full-window child so we fill the swapchain surface */
+    ImGui::SetNextWindowPos({0, 0});
+    ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("##root", nullptr,
+        ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoMove       |
+        ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar(2);
+
+    bool changed   = false;
+    int  param_id  = 0;
+    double new_val = 0.0;
+
+    /* ---- Mode strip -------------------------------------------------- */
+    const char *mode_labels[] = { "None", "NR1 (ANR)", "NR2 (EMNR)", "NR3 (RNNR)", "NR4 (SBNR)" };
+
+    /* Compute minimum window width from the header row every frame.
+     * Sum: WindowPadding*2 + 5 mode buttons + spacing between them
+     *    + spacing + Tips button (72) + spacing + About button (28). */
+    {
+        const ImGuiStyle &st = ImGui::GetStyle();
+        float w = st.WindowPadding.x * 2.0f;
+        for (int i = 0; i <= 4; ++i) {
+            w += ImGui::CalcTextSize(mode_labels[i]).x + st.FramePadding.x * 2.0f;
+            if (i < 4) w += st.ItemSpacing.x;
+        }
+        w += st.ItemSpacing.x + 72.0f + st.ItemSpacing.x + 28.0f;
+        g->min_w = (int)ceilf(w);
+    }
+    for (int i = 0; i <= 4; ++i) {
+        if (i > 0) ImGui::SameLine();
+        bool sel = (g->nr_mode == i);
+        if (sel) ImGui::PushStyleColor(ImGuiCol_Button, COL_ACCENT);
+        if (ImGui::Button(mode_labels[i]) && !g->updating) {
+            if (g->nr_mode != i) {
+                g->nr_mode = i;
+                changed = true; param_id = _GUI_PARAM_NR_MODE; new_val = i;
+            }
+        }
+        if (sel) ImGui::PopStyleColor();
+        {
+            const char *tt[] = {
+                "Disable noise reduction - audio passes through unchanged.",
+                "NR1: Adaptive LMS (ANR). Fast, low-latency, effective on stationary tones.",
+                "NR2: Spectral MMSE (EMNR). Broad-band noise floor reduction.",
+                "NR3: RNNoise neural-net denoiser. Good general-purpose speech denoising.",
+                "NR4: libspecbleach adaptive spectral denoiser."
+            };
+            show_tooltip_text(tt[i]);
+        }
+    }
+
+    /* Right-aligned: Tips toggle + About button */
+    {
+        float sp      = ImGui::GetStyle().ItemSpacing.x;
+        float tips_w  = 72.0f;
+        float about_w = 28.0f;
+        float total   = tips_w + sp + about_w;
+        ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - total);
+        const char *tips_lbl = g->tooltips_on ? "Tips: ON " : "Tips: OFF";
+        if (ImGui::Button(tips_lbl, {tips_w, 0}))
+            g->tooltips_on = !g->tooltips_on;
+        ImGui::SameLine();
+        if (ImGui::Button("?", {about_w, 0}))
+            ImGui::OpenPopup("About##popup");
+        show_tooltip_text("Show version and build information.");
+    }
+
+    ImGui::Separator();
+
+    /* ---- Mode-specific panels ---------------------------------------- */
+
+    /* -- Off ------------------------------------------------------------ */
+    if (g->nr_mode == 0) {
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_MUTED);
+        ImGui::TextWrapped("Noise reduction disabled - audio passes through unchanged.");
+        ImGui::PopStyleColor();
+    }
+
+    /* -- NR1 (ANR) ------------------------------------------------------ */
+    if (g->nr_mode == 1) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_SURFACE);
+        ImGui::BeginChild("##nr1grp", {-1, 0}, ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+        ImGui::TextUnformatted("NR1 - Adaptive LMS (ANR)");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        begin_param_table("##nr1");
+
+        int taps = g->anr_taps;
+        if (param_slider_int("Taps", "Filter length (16-2048). More taps = narrower notch "
+                             "but higher CPU cost. Default: 64.", &taps, 16, 2048)) {
+            if (!g->updating) {
+                g->anr_taps = taps;
+                changed = true; param_id = _GUI_PARAM_ANR_TAPS; new_val = taps;
+            }
+        }
+
+        int delay = g->anr_delay;
+        if (param_slider_int("Delay", "Decorrelation delay in samples (1-512). Increase for "
+                             "narrowband carriers; decrease for broadband hiss. Default: 16.",
+                             &delay, 1, 512)) {
+            if (!g->updating) {
+                g->anr_delay = delay;
+                changed = true; param_id = _GUI_PARAM_ANR_DELAY; new_val = delay;
+            }
+        }
+
+        /* Gain uses a log slider: display as 1e-6..0.01, store internally
+         * as log10 then convert back so small values are reachable. */
+        float gain_log = (g->anr_gain > 0.0)
+            ? (float)(log10(g->anr_gain) / log10(0.01) * -1.0 + 1.0) /* [0,1] mapped */
+            : 0.0f;
+        /* Simpler: just show a linear slider with scientific notation. */
+        float gain_f = (float)g->anr_gain;
+        if (param_slider_float("Gain", "LMS step size / two_mu (1e-6 to 0.01). Higher = faster "
+                               "adaptation but risk of instability. Default: 0.0001.",
+                               &gain_f, 1e-6f, 0.01f, "%.2e")) {
+            if (!g->updating) {
+                g->anr_gain = (double)gain_f;
+                changed = true; param_id = _GUI_PARAM_ANR_GAIN; new_val = gain_f;
+            }
+        }
+
+        float leak_f = (float)g->anr_leakage;
+        if (param_slider_float("Leakage", "Weight decay per sample (0.0-1.0). Prevents coefficient "
+                               "blow-up on stationary noise. Default: 0.1.",
+                               &leak_f, 0.0f, 1.0f, "%.3f")) {
+            if (!g->updating) {
+                g->anr_leakage = (double)leak_f;
+                changed = true; param_id = _GUI_PARAM_ANR_LEAKAGE; new_val = leak_f;
+            }
+        }
+
+        ImGui::EndTable();
+
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_MUTED);
+        ImGui::TextUnformatted("Taps 16-2048  |  Delay 1-512  |  Gain 1e-6 to 0.01  |  Leakage 0.0-1.0");
+        ImGui::PopStyleColor();
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    /* -- NR2 (EMNR) ----------------------------------------------------- */
+    if (g->nr_mode == 2) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_SURFACE);
+        ImGui::BeginChild("##nr2grp", {-1, 0}, ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+        ImGui::TextUnformatted("NR2 - Spectral MMSE (EMNR)");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        /* Gain Method combo */
+        ImGui::BeginTable("##nr2", 2, ImGuiTableFlags_None, {-1, 0});
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+        ImGui::TableSetupColumn("ctrl",  ImGuiTableColumnFlags_WidthStretch);
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted("Gain Method");
+        show_tooltip_text("Spectral gain function. MM-LSA (recommended) gives least "
+                          "musical noise. RROE and MEPSE are alternatives.");
+        ImGui::TableSetColumnIndex(1);
+        ImGui::SetNextItemWidth(-1.0f);
+        const char *gm[] = { "RROE", "MEPSE", "MM-LSA" };
+        int gmethod = g->emnr_gain_method;
+        if (ImGui::Combo("##gm", &gmethod, gm, 3) && !g->updating) {
+            g->emnr_gain_method = gmethod;
+            changed = true; param_id = _GUI_PARAM_EMNR_GAIN_METHOD; new_val = gmethod;
+        }
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted("NPE Method");
+        show_tooltip_text("Noise power estimation algorithm. OSMS tracks the noise "
+                          "floor more quickly; MMSE is smoother.");
+        ImGui::TableSetColumnIndex(1);
+        ImGui::SetNextItemWidth(-1.0f);
+        const char *nm[] = { "OSMS", "MMSE" };
+        int npe = g->emnr_npe_method;
+        if (ImGui::Combo("##nm", &npe, nm, 2) && !g->updating) {
+            g->emnr_npe_method = npe;
+            changed = true; param_id = _GUI_PARAM_EMNR_NPE_METHOD; new_val = npe;
+        }
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted("Audio Enhance");
+        show_tooltip_text("Post-filter gain mask that sharpens transients and "
+                          "improves intelligibility. Recommended: On.");
+        ImGui::TableSetColumnIndex(1);
+        bool ae = (g->emnr_ae_run != 0);
+        if (ImGui::Checkbox("##ae", &ae) && !g->updating) {
+            g->emnr_ae_run = ae ? 1 : 0;
+            changed = true; param_id = _GUI_PARAM_EMNR_AE_RUN; new_val = g->emnr_ae_run;
+        }
+
+        ImGui::EndTable();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    /* -- NR3 (RNNR) ----------------------------------------------------- */
+    if (g->nr_mode == 3) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_SURFACE);
+        ImGui::BeginChild("##nr3grp", {-1, 0}, ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+        ImGui::TextUnformatted("NR3 - RNNoise Neural Net (RNNR)");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        /* Model radio buttons */
+        const char *model_labels[] = { "Standard (built-in)", "Small", "Large" };
+        const char *model_tips[] = {
+            "Uses the default RNNoise model built into the DLL. Good general-purpose "
+            "suppression. No external files needed.",
+            "Loads rnnoise-small.bin from the install folder. Lower CPU cost.",
+            "Loads rnnoise-large.bin from the install folder. Strongest suppression, higher CPU."
+        };
+        ImGui::TextUnformatted("Model:");
+        ImGui::SameLine();
+        for (int i = 0; i < 3; ++i) {
+            if (i > 0) ImGui::SameLine();
+            ImGui::PushID(i);
+            if (ImGui::RadioButton(model_labels[i], g->nr3_model == i) && !g->updating) {
+                g->nr3_model = i;
+                changed = true; param_id = _GUI_PARAM_NR3_MODEL; new_val = i;
+            }
+            show_tooltip_text(model_tips[i]);
+            ImGui::PopID();
+        }
+
+        ImGui::Spacing();
+
+        begin_param_table("##nr3p");
+        float str = g->nr3_strength * 100.0f;
+        if (param_slider_float("Suppression",
+                "Blends denoised output with the original signal. "
+                "100% = full RNNoise suppression. 0% = bypass. "
+                "Reduce if the denoiser removes too much signal. Default: 100%.",
+                &str, 0.0f, 100.0f, "%.0f%%")) {
+            if (!g->updating) {
+                g->nr3_strength = str / 100.0f;
+                changed = true; param_id = _GUI_PARAM_NR3_STRENGTH;
+                new_val = (double)g->nr3_strength;
+            }
+        }
+        ImGui::EndTable();
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    /* -- NR4 (SBNR) ----------------------------------------------------- */
+    if (g->nr_mode == 4) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_SURFACE);
+        ImGui::BeginChild("##nr4grp", {-1, 0}, ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+        ImGui::TextUnformatted("NR4 - Adaptive Spectral Denoiser (SBNR)");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        begin_param_table("##nr4");
+        float reduc = g->nr4_reduction;
+        if (param_slider_float("Reduction",
+                "Noise attenuation (0-20 dB). Higher values suppress more noise "
+                "but may affect speech clarity. Default: 10 dB.",
+                &reduc, 0.0f, 20.0f, "%.1f dB")) {
+            if (!g->updating) {
+                g->nr4_reduction = reduc;
+                changed = true; param_id = _GUI_PARAM_NR4_REDUCTION; new_val = reduc;
+            }
+        }
+        ImGui::EndTable();
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
+    /* About popup modal - avoids the re-entrancy hazard of calling MessageBoxA
+     * from inside the render loop (its own message pump fires WM_TIMER). */
+    ImGui::SetNextWindowPos(
+        {ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y * 0.5f},
+        ImGuiCond_Always, {0.5f, 0.5f});
+    if (ImGui::BeginPopupModal("About##popup", nullptr,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        ImGui::Text("CLAP NR  v" CLAP_NR_VERSION_STR);
+        ImGui::Separator();
+        ImGui::Spacing();
+        ImGui::PushTextWrapPos(300.0f);
+        ImGui::TextUnformatted("Learn more and read the full credits at clapnr.com");
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        if (ImGui::Button("Visit clapnr.com", {160, 0})) {
+            g->open_website = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close", {80, 0}))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    /* Capture content height so window cannot be dragged shorter than
+     * whatever controls the current mode displays. */
+    g->min_h = (int)ceilf(ImGui::GetCursorPosY() + ImGui::GetStyle().WindowPadding.y);
+
+    ImGui::End(); /* ##root */
+
+    /* Commit changed parameter after the frame is built so we are outside
+     * any ImGui widget processing — avoids re-entrancy issues. */
+    if (changed && g->on_param_change)
+        g->on_param_change(g->plugin, (clap_id)param_id, new_val);
+
+    /* Render */
+    ImGui::Render();
+    float clear[4] = { COL_BG.x, COL_BG.y, COL_BG.z, 1.0f };
+    g->d3d_ctx->OMSetRenderTargets(1, &g->rtv, nullptr);
+    g->d3d_ctx->ClearRenderTargetView(g->rtv, clear);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    g->swap_chain->Present(1, 0);
+
+    /* Deferred actions that must not run inside the ImGui frame/message loop */
+    if (g->open_website) {
+        g->open_website = false;
+        ShellExecuteA(nullptr, "open", "https://clapnr.com",
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
+
+/* -----------------------------------------------------------------------
+ * Window procedure
+ * --------------------------------------------------------------------- */
+#define WC_IMGUI_NR  "ClapNrImGui_v1"
+
+static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
+        return 1;
+
+    clap_nr_gui_s *g = (clap_nr_gui_s *)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+    case WM_CREATE: {
+        auto *cs = (CREATESTRUCTA *)lp;
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        return 0;
+    }
+    case WM_SIZE:
+        if (g && g->swap_chain) {
+            UINT w = LOWORD(lp), h = HIWORD(lp);
+            if (w > 0 && h > 0 && (w != g->sc_w || h != g->sc_h))
+                d3d_resize(g, w, h);
+        }
+        return 0;
+    case WM_TIMER:
+        if (g) render_frame(g);
+        return 0;
+    case WM_PAINT:
+        if (g) render_frame(g);
+        ValidateRect(hwnd, nullptr);
+        return 0;
+    case WM_DESTROY:
+        if (g) g->hwnd = nullptr;
+        return 0;
+    case WM_SETICON:
+    case WM_SETTEXT:
+        /* Allow the host to override our icon/title at any time. */
+        break;
+    case WM_GETMINMAXINFO:
+        /* Prevent the floating window from being dragged narrower/shorter
+         * than the measured header row and current-mode content height. */
+        if (g && g->min_w > 0 && !g->embedded) {
+            DWORD wstyle   = (DWORD)GetWindowLongA(hwnd, GWL_STYLE);
+            DWORD wexstyle = (DWORD)GetWindowLongA(hwnd, GWL_EXSTYLE);
+            RECT  r = { 0, 0, (LONG)g->min_w, (LONG)g->min_h };
+            AdjustWindowRectEx(&r, wstyle, FALSE, wexstyle);
+            auto *mmi = (MINMAXINFO *)lp;
+            mmi->ptMinTrackSize.x = r.right  - r.left;
+            mmi->ptMinTrackSize.y = r.bottom - r.top;
+            return 0;
+        }
+        break;
+    case WM_WINDOWPOSCHANGING:
+        /* For embedded (child) windows the host drives sizing, so clamp via
+         * WM_WINDOWPOSCHANGING rather than WM_GETMINMAXINFO. */
+        if (g && g->min_w > 0 && g->embedded) {
+            auto *wpos = (WINDOWPOS *)lp;
+            if (!(wpos->flags & SWP_NOSIZE)) {
+                if (wpos->cx < g->min_w) wpos->cx = g->min_w;
+                if (wpos->cy < g->min_h) wpos->cy = g->min_h;
+            }
+            return 0;
+        }
+        break;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static void register_class_imgui()
+{
+    WNDCLASSEXA wc = {};
+    if (GetClassInfoExA(GetModuleHandleA(nullptr), WC_IMGUI_NR, &wc)) return;
+    wc.cbSize        = sizeof(wc);
+    wc.style         = CS_OWNDC;
+    wc.lpfnWndProc   = imgui_wndproc;
+    wc.hInstance     = GetModuleHandleA(nullptr);
+    wc.hCursor       = LoadCursorA(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = WC_IMGUI_NR;
+    /* Inherit the host application's icon so the taskbar shows something
+     * sensible before the host pushes its own icon via WM_SETICON. */
+    wc.hIcon   = (HICON)GetClassLongPtrA(GetForegroundWindow(), GCLP_HICON);
+    wc.hIconSm = (HICON)GetClassLongPtrA(GetForegroundWindow(), GCLP_HICONSM);
+    RegisterClassExA(&wc);
+}
+
+/* -----------------------------------------------------------------------
+ * Create the actual OS window + ImGui context for a given gui instance
+ * --------------------------------------------------------------------- */
+static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
+                                     int x, int y, int w, int h,
+                                     DWORD style, DWORD exstyle)
+{
+    register_class_imgui();
+
+    g->hwnd = CreateWindowExA(exstyle, WC_IMGUI_NR,
+                               g->embedded ? nullptr : g->window_title,
+                               
+                               style, x, y, w, h,
+                               parent, nullptr, GetModuleHandleA(nullptr), g);
+    if (!g->hwnd) return false;
+
+    /* Request dark non-client frame (title bar + borders) on Windows 10 20H1+
+     * and Windows 11.  DWMWA_USE_IMMERSIVE_DARK_MODE == 20; older SDKs only
+     * define 19 (the unofficial pre-release attribute), so we define both and
+     * try the official value first. */
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+    {
+        BOOL dark = TRUE;
+        if (FAILED(DwmSetWindowAttribute(g->hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark))))
+            DwmSetWindowAttribute(g->hwnd, 19, &dark, sizeof(dark)); /* pre-20H1 */
+    }
+
+    if (!d3d_create(g, g->hwnd)) {
+        DestroyWindow(g->hwnd); g->hwnd = nullptr;
+        return false;
+    }
+
+    /* One shared ImGui context per plugin instance (each instance gets its own) */
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = nullptr;  /* no imgui.ini on disk */
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    apply_theme();
+
+    ImGui_ImplWin32_Init(g->hwnd);
+    ImGui_ImplDX11_Init(g->d3d_device, g->d3d_ctx);
+
+    /* 60 fps render timer (WM_TIMER, ~16 ms) */
+    g->timer_id = SetTimer(g->hwnd, 1, 16, nullptr);
+
+    return true;
+}
+
+/* -----------------------------------------------------------------------
+ * Public API that matches gui.h
+ * --------------------------------------------------------------------- */
+
+clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
+                          const char *title)
+{
+    auto *g = (clap_nr_gui_s *)calloc(1, sizeof(clap_nr_gui_s));
+    if (!g) return nullptr;
+    g->plugin          = plugin;
+    g->on_param_change = on_param_change;
+    strncpy(g->window_title, (title && title[0]) ? title : "CLAP NR", 255);
+    g->window_title[255] = '\0';
+    /* Defaults matching factory_create_plugin in clap_nr.c */
+    g->nr_mode          = 0;
+    g->anr_taps         = 64;
+    g->anr_delay        = 16;
+    g->anr_gain         = 0.0001;
+    g->anr_leakage      = 0.1;
+    g->emnr_gain_method = 2;   /* MM-LSA */
+    g->emnr_npe_method  = 0;   /* OSMS   */
+    g->emnr_ae_run      = 1;
+    g->nr4_reduction    = 10.0f;
+    g->nr3_model        = 0;
+    g->nr3_strength     = 1.0f;
+    g->tooltips_on      = true;
+    g->min_w            = GUI_BASE_W;
+    g->min_h            = GUI_BASE_H;
+    return g;
+}
+
+void gui_destroy(clap_nr_gui_t *gui)
+{
+    if (!gui) return;
+    if (gui->hwnd) {
+        if (gui->timer_id) KillTimer(gui->hwnd, gui->timer_id);
+        ImGui_ImplDX11_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        d3d_destroy(gui);
+        DestroyWindow(gui->hwnd);
+        gui->hwnd = nullptr;
+    }
+    free(gui);
+}
+
+bool gui_set_parent(clap_nr_gui_t *gui, const clap_window_t *window)
+{
+    if (!gui || !window) return false;
+    gui->embedded = true;
+    HWND parent = (HWND)window->win32;
+    RECT rc; GetClientRect(parent, &rc);
+    int w = rc.right  - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w < GUI_BASE_W) w = GUI_BASE_W;
+    if (h < GUI_BASE_H) h = GUI_BASE_H;
+    return create_window_and_imgui(gui, parent,
+                                   0, 0, w, h,
+                                   WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0);
+}
+
+void gui_get_size(clap_nr_gui_t *gui, uint32_t *out_w, uint32_t *out_h)
+{
+    (void)gui;
+    *out_w = GUI_BASE_W;
+    *out_h = GUI_BASE_H;
+}
+
+bool gui_show(clap_nr_gui_t *gui)
+{
+    if (!gui) return false;
+
+    if (!gui->hwnd) {
+        /* Floating window */
+        gui->embedded = false;
+        POINT pt = { 200, 200 };
+        GetCursorPos(&pt);
+        /* Normal overlapped window: caption + close button only (no min/max).
+         * WS_OVERLAPPED gives a proper taskbar entry and standard title bar.
+         * WS_EX_APPWINDOW makes the taskbar button appear even when hosted. */
+        DWORD style   = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+        DWORD exstyle = WS_EX_APPWINDOW;
+        RECT  r       = { 0, 0, GUI_BASE_W, GUI_BASE_H };
+        AdjustWindowRectEx(&r, style, FALSE, exstyle);
+        int ww = r.right - r.left, wh = r.bottom - r.top;
+        int wx = pt.x - ww / 4, wy = pt.y + 16;
+
+        HMONITOR hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfoA(hmon, &mi)) {
+            if (wx + ww > mi.rcWork.right)  wx = mi.rcWork.right  - ww;
+            if (wy + wh > mi.rcWork.bottom) wy = mi.rcWork.bottom - wh;
+            if (wx < mi.rcWork.left)        wx = mi.rcWork.left;
+            if (wy < mi.rcWork.top)         wy = mi.rcWork.top;
+        }
+        if (!create_window_and_imgui(gui, nullptr, wx, wy, ww, wh, style, exstyle))
+            return false;
+    }
+
+    if (IsIconic(gui->hwnd)) ShowWindow(gui->hwnd, SW_RESTORE);
+    else                     ShowWindow(gui->hwnd, SW_SHOW);
+
+    if (!gui->embedded) {
+        SetWindowPos(gui->hwnd, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetForegroundWindow(gui->hwnd);
+    }
+    return true;
+}
+
+bool gui_hide(clap_nr_gui_t *gui)
+{
+    if (!gui || !gui->hwnd) return false;
+    ShowWindow(gui->hwnd, SW_HIDE);
+    return true;
+}
+
+bool gui_resize(clap_nr_gui_t *gui, uint32_t w, uint32_t h)
+{
+    if (!gui || !gui->hwnd || !gui->embedded) return false;
+    UINT nw = (w < GUI_BASE_W) ? GUI_BASE_W : w;
+    UINT nh = (h < GUI_BASE_H) ? GUI_BASE_H : h;
+    SetWindowPos(gui->hwnd, nullptr, 0, 0, (int)nw, (int)nh,
+                 SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+    return true;
+}
+
+void gui_set_param(clap_nr_gui_t *gui, clap_id param_id, double value)
+{
+    if (!gui) return;
+    gui->updating = true;
+    switch (param_id) {
+    case _GUI_PARAM_NR_MODE:          gui->nr_mode          = (int)value;   break;
+    case _GUI_PARAM_ANR_TAPS:         gui->anr_taps         = (int)value;   break;
+    case _GUI_PARAM_ANR_DELAY:        gui->anr_delay        = (int)value;   break;
+    case _GUI_PARAM_ANR_GAIN:         gui->anr_gain         = value;         break;
+    case _GUI_PARAM_ANR_LEAKAGE:      gui->anr_leakage      = value;         break;
+    case _GUI_PARAM_EMNR_GAIN_METHOD: gui->emnr_gain_method = (int)value;   break;
+    case _GUI_PARAM_EMNR_NPE_METHOD:  gui->emnr_npe_method  = (int)value;   break;
+    case _GUI_PARAM_EMNR_AE_RUN:      gui->emnr_ae_run      = (int)value;   break;
+    case _GUI_PARAM_NR4_REDUCTION:    gui->nr4_reduction    = (float)value; break;
+    case _GUI_PARAM_NR3_MODEL:        gui->nr3_model        = (int)value;   break;
+    case _GUI_PARAM_NR3_STRENGTH:     gui->nr3_strength     = (float)value; break;
+    }
+    gui->updating = false;
+    /* No explicit redraw needed; the 60 fps timer will catch the next frame */
+}
+

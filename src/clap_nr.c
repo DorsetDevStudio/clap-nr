@@ -1326,7 +1326,14 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
     (void)api;
     if (self->gui) return true;
     self->gui_floating = is_floating;
-    self->gui = gui_create(self, on_gui_param_change);
+    char gui_title[256];
+    const char *host_name = (self->host && self->host->name && self->host->name[0])
+                            ? self->host->name : NULL;
+    if (host_name)
+        snprintf(gui_title, sizeof(gui_title), "%s  |  " PLUGIN_NAME, host_name);
+    else
+        snprintf(gui_title, sizeof(gui_title), "%s", PLUGIN_NAME);
+    self->gui = gui_create(self, on_gui_param_change, gui_title);
     return self->gui != NULL;
 }
 

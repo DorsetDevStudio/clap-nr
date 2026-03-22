@@ -49,6 +49,7 @@ It uses a non modified version of rmnoise and implements a ringbuffer to handle 
 #ifndef _rnnr_h
 #define _rnnr_h
 
+#include "comm.h"
 #include "rnnoise.h"
 
 #define FRAME_SIZE
@@ -85,7 +86,7 @@ typedef struct _rnnr
     rnnr_ring_buffer input_ring;
     rnnr_ring_buffer output_ring;
 
-    CRITICAL_SECTION cs;
+    NR_MUTEX cs;
 
 } rnnr, *RNNR;
 

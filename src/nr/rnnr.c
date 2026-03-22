@@ -102,7 +102,7 @@ static void ring_buffer_init(rnnr_ring_buffer* rb, int capacity)
 
 static void ring_buffer_free(rnnr_ring_buffer* rb) 
 {
-    _aligned_free(rb->buf);
+    nr_aligned_free(rb->buf);
     rb->buf = NULL;
     rb->capacity = 0;
     rb->head = rb->tail = rb->count = 0;
@@ -139,7 +139,7 @@ static void ring_buffer_resize(rnnr_ring_buffer* rb, int new_capacity)
     {
         new_buf[i] = rb->buf[(rb->head + i) % rb->capacity];
     }
-    _aligned_free(rb->buf);
+    nr_aligned_free(rb->buf);
     rb->buf = new_buf;
     rb->capacity = new_capacity;
     rb->head = 0;
@@ -158,17 +158,17 @@ void SetRXARNNRRun (int channel, int run)
                              rxa[channel].emnr.p->run, rxa[channel].anf.p->run, rxa[channel].anr.p->run,
                              run, rxa[channel].sbnr.p->run); // NR3 + NR4 support
 
-		EnterCriticalSection (&ch[channel].csDSP);
+		NR_MUTEX_LOCK(ch[channel].csDSP);
 		a->run = run;
 		RXAbp1Set (channel);
-		LeaveCriticalSection (&ch[channel].csDSP);
+		NR_MUTEX_UNLOCK(ch[channel].csDSP);
 	}
 }
 #endif // CLAP_NR_STANDALONE
 
 void setSize_rnnr(RNNR a, int size) 
 {
-    _aligned_free(a->output_buffer);
+    nr_aligned_free(a->output_buffer);
     a->buffer_size = size;
     a->output_buffer = malloc0(a->buffer_size * sizeof(float));
 
@@ -192,7 +192,7 @@ void setSamplerate_rnnr(RNNR a, int rate)
 RNNR create_rnnr(int run, int position, int size, double* in, double* out, int rate)
 {
     RNNR a = malloc0(sizeof(rnnr));
-    InitializeCriticalSection(&a->cs);
+    NR_MUTEX_INIT(a->cs);
     a->run = run;
     a->position = position;
     a->rate = rate; // not used currently, but here for future use
@@ -215,7 +215,7 @@ RNNR create_rnnr(int run, int position, int size, double* in, double* out, int r
         int new_cap = _rnnr_capacity ? _rnnr_capacity * 2 : 4; // limit number of reallocs by doubling space each time, overkill but that is my middle name ;)
         RNNR* tmp = malloc0(new_cap * sizeof(RNNR));
         memcpy(tmp, _rnnr_instances, _rnnr_count * sizeof(RNNR));
-        _aligned_free(_rnnr_instances);
+        nr_aligned_free(_rnnr_instances);
         _rnnr_instances = tmp;
         _rnnr_capacity = new_cap;
     }
@@ -234,7 +234,7 @@ void xrnnr(RNNR a, int pos)
         float* to_process = a->to_process_buffer;
         float* process_out = a->processed_output_buffer;
 
-        EnterCriticalSection(&a->cs);
+        NR_MUTEX_LOCK(a->cs);
         for (int i = 0; i < bs; i++)
         {
             ring_buffer_put(&a->input_ring, (float)a->in[2 * i + 0]);
@@ -271,7 +271,7 @@ void xrnnr(RNNR a, int pos)
                 }
             }
         }
-        LeaveCriticalSection(&a->cs);
+        NR_MUTEX_UNLOCK(a->cs);
 
         if (a->output_ring.count >= bs)
         {
@@ -305,22 +305,22 @@ void destroy_rnnr(RNNR a)
         }
     }
 
-    EnterCriticalSection(&a->cs);
+    NR_MUTEX_LOCK(a->cs);
     rnnoise_destroy(a->st);
-    LeaveCriticalSection(&a->cs);
-    DeleteCriticalSection(&a->cs);
+    NR_MUTEX_UNLOCK(a->cs);
+    NR_MUTEX_DESTROY(a->cs);
 
-    _aligned_free(a->to_process_buffer);
-    _aligned_free(a->processed_output_buffer);
-    _aligned_free(a->output_buffer);
+    nr_aligned_free(a->to_process_buffer);
+    nr_aligned_free(a->processed_output_buffer);
+    nr_aligned_free(a->output_buffer);
     ring_buffer_free(&a->input_ring);
     ring_buffer_free(&a->output_ring);
-    _aligned_free(a);
+    nr_aligned_free(a);
 
     // tidy if none now in use
     if (_rnnr_count == 0)
     {
-        _aligned_free(_rnnr_instances);
+        nr_aligned_free(_rnnr_instances);
         _rnnr_instances = NULL;
         _rnnr_capacity = 0;
     }
@@ -335,11 +335,11 @@ void RNNRloadModel(const char* file_path)
     for (int i = 0; i < _rnnr_count; i++)
     {
         RNNR a = _rnnr_instances[i];
-        EnterCriticalSection(&a->cs);
+        NR_MUTEX_LOCK(a->cs);
         a->run_old = a->run;
         a->run = 0;
         rnnoise_destroy(a->st);
-        LeaveCriticalSection(&a->cs);
+        NR_MUTEX_UNLOCK(a->cs);
     }
 
     // free up any previous loaded model
@@ -360,10 +360,10 @@ void RNNRloadModel(const char* file_path)
     for (int i = 0; i < _rnnr_count; i++)
     {
         RNNR a = _rnnr_instances[i];
-        EnterCriticalSection(&a->cs);
+        NR_MUTEX_LOCK(a->cs);
         a->st = rnnoise_create(_rnnr_model);
         a->run = a->run_old;
-        LeaveCriticalSection(&a->cs);
+        NR_MUTEX_UNLOCK(a->cs);
     }
 }
 
@@ -371,10 +371,10 @@ void RNNRloadModel(const char* file_path)
 PORT
 void SetRXARNNRPosition(int channel, int position)
 {
-    EnterCriticalSection(&ch[channel].csDSP);
+    NR_MUTEX_LOCK(ch[channel].csDSP);
     rxa[channel].rnnr.p->position = position;
     rxa[channel].bp1.p->position = position;
-    LeaveCriticalSection(&ch[channel].csDSP);
+    NR_MUTEX_UNLOCK(ch[channel].csDSP);
 }
 #endif // CLAP_NR_STANDALONE
 

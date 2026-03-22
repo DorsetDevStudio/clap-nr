@@ -104,9 +104,9 @@ void setSamplerate_sbnr(SBNR a, int rate)
     a->rate          = rate;
     a->frame_samples = (int)ceilf(20.0f * (float)rate / 1000.0f);
     a->st            = specbleach_adaptive_initialize((uint32_t)rate, 20.0f);
-    _aligned_free(a->input);
-    _aligned_free(a->output);
-    _aligned_free(a->outq);
+    nr_aligned_free(a->input);
+    nr_aligned_free(a->output);
+    nr_aligned_free(a->outq);
     a->input          = malloc0(a->frame_samples * sizeof(float));
     a->output         = malloc0(a->frame_samples * sizeof(float));
     a->outq           = malloc0(a->frame_samples * sizeof(float));
@@ -180,10 +180,10 @@ void xsbnr (SBNR a, int pos)
 void destroy_sbnr (SBNR a)
 {
     specbleach_adaptive_free(a->st);
-    _aligned_free(a->input);
-    _aligned_free(a->output);
-    _aligned_free(a->outq);
-    _aligned_free(a);
+    nr_aligned_free(a->input);
+    nr_aligned_free(a->output);
+    nr_aligned_free(a->outq);
+    nr_aligned_free(a);
 }
 
 #ifndef CLAP_NR_STANDALONE
@@ -196,10 +196,10 @@ void SetRXASBNRRun (int channel, int run)
 		RXAbp1Check (channel, rxa[channel].amd.p->run, rxa[channel].snba.p->run, 
                              rxa[channel].emnr.p->run, rxa[channel].anf.p->run, rxa[channel].anr.p->run,
                              rxa[channel].rnnr.p->run, run);
-		EnterCriticalSection (&ch[channel].csDSP);
+		NR_MUTEX_LOCK(&ch[channel].csDSP);
 		a->run = run;
 		RXAbp1Set (channel);
-		LeaveCriticalSection (&ch[channel].csDSP);
+		NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 	}
 }
 
@@ -210,9 +210,9 @@ void SetRXASBNRreductionAmount (int channel, float amount)
 {
     if (amount < 0 || amount > 20) return;
 
-	EnterCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_LOCK(&ch[channel].csDSP);
 	rxa[channel].sbnr.p->reduction_amount = amount;
-	LeaveCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 }
 
 /* Percentage of smoothing to apply. Averages the reduction calculation frame
@@ -224,9 +224,9 @@ void SetRXASBNRsmoothingFactor (int channel, float factor)
 {
     if (factor < 0 || factor > 100) return;
 
-	EnterCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_LOCK(&ch[channel].csDSP);
 	rxa[channel].sbnr.p->smoothing_factor = factor;
-	LeaveCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 }
 
 /* Percentage of whitening that is going to be applied to the residue of the
@@ -238,9 +238,9 @@ void SetRXASBNRwhiteningFactor (int channel, float factor)
 {
     if (factor < 0 || factor > 100) return;
 
-	EnterCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_LOCK(&ch[channel].csDSP);
 	rxa[channel].sbnr.p->whitening_factor = factor;
-	LeaveCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 }
 
 /* Strength in which the reduction will be applied. It uses the masking
@@ -253,9 +253,9 @@ void SetRXASBNRnoiseRescale (int channel, float factor)
 {
     if (factor < 0 || factor > 12) return;
 
-	EnterCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_LOCK(&ch[channel].csDSP);
 	rxa[channel].sbnr.p->noise_rescale = factor;
-	LeaveCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 }
 
 /* Sets the SNR threshold in dB in which the post-filter will start to blur
@@ -266,9 +266,9 @@ void SetRXASBNRpostFilterThreshold (int channel, float threshold)
 {
     if (threshold < -10 || threshold > 10) return;
 
-	EnterCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_LOCK(&ch[channel].csDSP);
 	rxa[channel].sbnr.p->post_filter_threshold = threshold;
-	LeaveCriticalSection (&ch[channel].csDSP);
+	NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 }
 
 /* Type of algorithm used to scale noise in order to apply over or under
@@ -281,17 +281,17 @@ void SetRXASBNRnoiseScalingType(int channel, int noise_scaling_type)
 {
     if (noise_scaling_type < 0 || noise_scaling_type > 2) return;
 
-    EnterCriticalSection(&ch[channel].csDSP);
+    NR_MUTEX_LOCK(&ch[channel].csDSP);
     rxa[channel].sbnr.p->noise_scaling_type = noise_scaling_type;
-    LeaveCriticalSection(&ch[channel].csDSP);
+    NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 }
 
 PORT
 void SetRXASBNRPosition(int channel, int position)
 {
-    EnterCriticalSection(&ch[channel].csDSP);
+    NR_MUTEX_LOCK(&ch[channel].csDSP);
     rxa[channel].sbnr.p->position = position;
     rxa[channel].bp1.p->position = position;
-    LeaveCriticalSection(&ch[channel].csDSP);
+    NR_MUTEX_UNLOCK(&ch[channel].csDSP);
 }
 #endif // CLAP_NR_STANDALONE

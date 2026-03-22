@@ -86,36 +86,137 @@ well-isolated.
 
 ---
 
-## Building on Windows
+## Getting, building, and installing on Windows
 
-### Prerequisites
+This section walks you through everything from scratch. You do not need any
+prior programming experience. Just follow each step in order.
 
-- CMake 3.20 or later
-- Visual Studio 2022 (MSVC, x64) **or** MinGW-w64 (x64)
+---
 
-### Step 1 - Build
+### Part 1 - Install the required tools (one time only)
 
-```
-cmake -B build -S . -A x64
-cmake --build build --config Release
-```
+You only need to do this once. If you already have Git, CMake, and Visual
+Studio 2022 installed, skip to Part 2.
 
-The output is `build\Release\clap-nr.clap`.
+**Step 1 - Install Git**
 
-### Step 2 - Install
+Git is the tool used to download (clone) this repository from GitHub.
 
-Copy `clap-nr.clap` and the three runtime DLLs to your CLAP plugin folder:
+1. Go to https://git-scm.com/download/win and download the installer.
+2. Run the installer. The default options are fine - just click Next through
+   each screen and then Install.
+3. When it finishes, close the installer.
 
-```
-%COMMONPROGRAMFILES%\CLAP\
-```
+**Step 2 - Install CMake**
 
-The required DLLs are already present under `libs/` and should be copied
-alongside the plugin:
+CMake is the tool that prepares the build system before compiling.
 
-- `libfftw3-3.dll`
-- `rnnoise.dll`
-- `specbleach.dll`
+1. Go to https://cmake.org/download/ and download the Windows x64 installer
+   (the file ending in `-windows-x86_64.msi`).
+2. Run the installer.
+3. On the "Install Options" screen, select **Add CMake to the system PATH for
+   all users**. This is important.
+4. Click Next through the remaining screens and then Install.
+
+**Step 3 - Install Visual Studio 2022 Community**
+
+Visual Studio is the compiler that turns the source code into the plugin.
+The Community edition is free.
+
+1. Go to https://visualstudio.microsoft.com/vs/community/ and click
+   **Download Visual Studio**.
+2. Run the installer. When it asks what to install, tick the workload called
+   **Desktop development with C++** and leave everything else as-is.
+3. Click Install. This may take a while depending on your internet speed.
+
+---
+
+### Part 2 - Get the source code
+
+1. Open **Command Prompt**. You can find it by pressing the Windows key,
+   typing `cmd`, and pressing Enter.
+2. Decide where you want to put the project folder. For example, if you want
+   it on your Desktop, type:
+   ```
+   cd %USERPROFILE%\Desktop
+   ```
+3. Type the following command and press Enter to download the repository:
+   ```
+   git clone https://github.com/g5stu/clap-nr.git
+   ```
+4. Once it finishes, a folder called `clap-nr` will appear in your chosen
+   location. Type the following to enter it:
+   ```
+   cd clap-nr
+   ```
+
+---
+
+### Part 3 - Build the plugin
+
+1. In the same Command Prompt window (still inside the `clap-nr` folder),
+   type the following and press Enter:
+   ```
+   build.bat
+   ```
+2. You will see a lot of text scroll past. This is normal. Wait for it to
+   finish. It should end with something like `Build succeeded`.
+3. When it is done, the compiled plugin file will be at:
+   ```
+   build\Release\clap-nr.clap
+   ```
+
+If you see any error messages, double-check that Visual Studio 2022 is
+installed with the **Desktop development with C++** workload (Part 1, Step 3)
+and that CMake was added to the PATH (Part 1, Step 2).
+
+---
+
+### Part 4 - Install the plugin
+
+The install script copies the plugin and its required support files to the
+standard Windows CLAP plugin folder so your host application can find it.
+
+**You must run this as Administrator.**
+
+1. Open **File Explorer** and navigate to the `clap-nr` folder.
+2. Right-click on **install.bat** and choose **Run as administrator**.
+3. If Windows asks "Do you want to allow this app to make changes to your
+   device?", click **Yes**.
+4. A Command Prompt window will open and run the install. When it finishes
+   successfully you will see:
+   ```
+   Installed to C:\Program Files\Common Files\CLAP
+   Press any key to continue . . .
+   ```
+5. Press any key to close the window.
+
+The plugin is now installed. Open your CLAP-compatible host application
+(for example, Station Master Pro) and it should appear in the plugin list.
+You may need to trigger a plugin rescan inside the host.
+
+---
+
+### Part 5 - Uninstall the plugin
+
+If you want to remove the plugin from your system:
+
+**You must run this as Administrator.**
+
+1. Open **File Explorer** and navigate to the `clap-nr` folder.
+2. Right-click on **uninstall.bat** and choose **Run as administrator**.
+3. If Windows asks "Do you want to allow this app to make changes to your
+   device?", click **Yes**.
+4. A Command Prompt window will open. When it finishes you will see:
+   ```
+   Uninstalled from C:\Program Files\Common Files\CLAP
+   Press any key to continue . . .
+   ```
+5. Press any key to close the window.
+
+**Note:** If either script reports that a file is locked, it means your CLAP
+host application is still running and has the plugin loaded. Close the host
+application first, then run the script again.
 
 ---
 

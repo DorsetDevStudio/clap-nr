@@ -317,9 +317,14 @@ void calc_emnr(EMNR a)
 	a->iaoutidx = 0;
 	if (a->fsize > a->bsize)
 	{
-		if (a->bsize > a->incr)  a->oasize = a->bsize;
-		else					 a->oasize = a->incr;
-		a->oainidx = (a->fsize - a->bsize - a->incr) % a->oasize;
+		/* oasize must be large enough to hold fsize samples of overlap-add
+		 * latency.  The original formula used max(bsize,incr), which fails
+		 * when bsize < incr because oainidx advances by incr mod oasize = 0,
+		 * causing every FFT frame to overwrite the same outaccum positions
+		 * and producing severe clicking artifacts. */
+		a->oasize = a->fsize;
+		a->oainidx = a->fsize - a->bsize - a->incr;
+		if (a->oainidx < 0) a->oainidx += a->oasize;
 	}
 	else
 	{

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(clap-nr C)
+project(clap-nr
+    VERSION 1.0.0
+    LANGUAGES C
+)
 
 set(CMAKE_C_STANDARD 11)
 
@@ -56,7 +59,7 @@ target_link_libraries(clap-nr PRIVATE
 
 # Windows-specific
 if(WIN32)
-    target_link_libraries(clap-nr PRIVATE comctl32 delayimp)
+    target_link_libraries(clap-nr PRIVATE comctl32 shell32 delayimp)
     # Delay-load companion DLLs so LoadLibrary(clap-nr.clap) succeeds before
     # entry_init() pre-loads them from the plugin's own directory.
     target_link_options(clap-nr PRIVATE

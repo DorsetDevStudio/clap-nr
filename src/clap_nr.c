@@ -58,6 +58,7 @@
 
 /* Platform GUI */
 #include "gui.h"
+#include "version.h"
 
 /* -----------------------------------------------------------------------
  * Plugin identity
@@ -65,8 +66,14 @@
 #define PLUGIN_ID      "com.dorsetdevstufio.clap-nr"
 #define PLUGIN_NAME    "CLAP NR"
 #define PLUGIN_VENDOR  "Station Master"
-#define PLUGIN_VERSION "1.0.0"
+#define PLUGIN_VERSION CLAP_NR_VERSION_STR
 #define PLUGIN_URL     ""
+
+/* EMNR_CHUNK: number of samples fed to xemnr per call.
+ * Must be smaller than fsize (4096) so the STFT accumulates real audio
+ * across multiple process() blocks.  128 works for any practical host
+ * block size (hosts typically use 64-512 frames per block). */
+#define EMNR_CHUNK 128
 
 /* -----------------------------------------------------------------------
  * Parameter IDs  (must stay stable - used in saved state)
@@ -179,6 +186,7 @@ static void                plugin_reset(const clap_plugin_t *);
 static clap_process_status plugin_process(const clap_plugin_t *, const clap_process_t *);
 static const void         *plugin_get_extension(const clap_plugin_t *, const char *);
 static void                plugin_on_main_thread(const clap_plugin_t *);
+static void                nr_log(const char *fmt, ...);
 
 /* -----------------------------------------------------------------------
  * Helper: apply ANR parameter changes to the live instance
@@ -226,15 +234,70 @@ static void apply_emnr_params(clap_nr_t *self)
 /* -----------------------------------------------------------------------
  * Helper: apply NR mode (run flags)
  * --------------------------------------------------------------------- */
+
+/* Reset EMNR noise estimator state for a clean entry into NR2 mode.
+ *
+ * Root cause of NR2 silence: sigma2N is initialised to 0.5 for every bin.
+ * Normal float audio has per-bin spectral power well below 0.5, so
+ * gamma = lambda_y / sigma2N < 1 on the very first call.  The gain
+ * methods interpret gamma < 1 as "more noise than signal" and apply maximum
+ * suppression, producing zero output forever (the estimator never escapes
+ * because there is no signal passing through to drive it).
+ *
+ * Fix: set sigma2N (and related tracking state) to near-zero so that
+ * gamma >> 1 from the very first frame.  The Wiener filter then passes
+ * audio at near-unity gain while the noise estimator adapts to the actual
+ * noise floor over the next few seconds. */
+
+static void reset_emnr_for_nr2_entry(EMNR e)
+{
+    int k, u;
+    if (!e) return;
+    /* Flush ring-buffer / overlap-add state for a clean restart */
+    flush_emnr(e);
+    /* Reset per-bin noise estimates and gain-smoother state */
+    for (k = 0; k < e->np.msize; k++) {
+        e->np.sigma2N[k]    = 1.0e-12;
+        e->np.p[k]          = 1.0e-12;
+        e->np.pbar[k]       = 1.0e-12;
+        e->np.p2bar[k]      = 1.0e-24;
+        e->np.pmin_u[k]     = 1.0e-12;
+        e->np.actmin[k]     = 1.0e300;   /* restart running-minimum search */
+        e->np.actmin_sub[k] = 1.0e300;
+        e->g.prev_mask[k]   = 1.0;       /* start with unity gain */
+        e->g.prev_gamma[k]  = 1.0;
+        e->g.lambda_d[k]    = 1.0e-12;   /* shared lambda_d used by all NPE */
+    }
+    for (u = 0; u < e->np.U; u++)
+        for (k = 0; k < e->np.msize; k++)
+            e->np.actminbuff[u][k] = 1.0e300;
+    e->np.subwc   = 1;
+    e->np.amb_idx = 0;
+    e->np.alphaC  = 1.0;
+    /* Reset MMSE NPE noise estimates */
+    for (k = 0; k < e->nps.msize; k++)
+        e->nps.sigma2N[k] = 1.0e-12;
+}
+
 static void apply_nr_mode(clap_nr_t *self, int new_mode)
 {
+    /* Detect transition INTO NR2 before updating run flags */
+    bool entering_nr2 = (new_mode == 2) &&
+                        (self->emnr[0] ? (self->emnr[0]->run == 0) : false);
     self->nr_mode = new_mode;
     for (int ch = 0; ch < 2; ++ch) {
         if (self->anr[ch])  self->anr[ch]->run  = (new_mode == 1) ? 1 : 0;
         if (self->emnr[ch]) self->emnr[ch]->run = (new_mode == 2) ? 1 : 0;
         if (self->rnnr[ch]) self->rnnr[ch]->run = (new_mode == 3) ? 1 : 0;
         if (self->sbnr[ch]) self->sbnr[ch]->run = (new_mode == 4) ? 1 : 0;
+        if (entering_nr2 && self->emnr[ch])
+            reset_emnr_for_nr2_entry(self->emnr[ch]);
     }
+    nr_log("apply_nr_mode: mode=%d  emnr[0].run=%d emnr[1].run=%d  reset=%d",
+           new_mode,
+           (self->emnr[0] ? self->emnr[0]->run : -1),
+           (self->emnr[1] ? self->emnr[1]->run : -1),
+           (int)entering_nr2);
 }
 
 /* -----------------------------------------------------------------------
@@ -295,14 +358,29 @@ static void plugin_destroy(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
 
+    /* Guard against hosts that call destroy() without a prior deactivate().
+     * Setting active=false and draining process_depth ensures that
+     * destroy_emnr() -> fftw_destroy_plan() never races fftw_execute(),
+     * which would cause FFTW to call abort() and kill the host process.
+     * When deactivate() was already called this drain returns instantly. */
+    self->active = false;
+    MemoryBarrier();
+    while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
+        Sleep(0);
+
     if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
 
-    for (int ch = 0; ch < 2; ++ch) {
-        if (self->anr[ch])  destroy_anr (self->anr[ch]);
-        if (self->emnr[ch]) destroy_emnr(self->emnr[ch]);
-        if (self->rnnr[ch]) destroy_rnnr(self->rnnr[ch]);
-        if (self->sbnr[ch]) destroy_sbnr(self->sbnr[ch]);
-        free(self->buf[ch]);
+    __try {
+        for (int ch = 0; ch < 2; ++ch) {
+            if (self->anr[ch])  { destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
+            if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
+            if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
+            if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
+            free(self->buf[ch]); self->buf[ch] = NULL;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        nr_log("destroy: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
     }
 
     free(self);
@@ -343,7 +421,13 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
             for (int ch = 0; ch < 2; ++ch) {
                 /* NR algorithms use interleaved complex (I/Q) layout:
                  * index [2*i+0] = real sample, [2*i+1] = imaginary (kept 0). */
-                self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
+                /* Allocate EMNR_CHUNK extra headroom so the EMNR chunked-stride
+                 * loop never reads/writes past the end of the buffer when
+                 * max_frames is not a multiple of EMNR_CHUNK (e.g. 480 at 48 kHz).
+                 * n_rounded = ceil(max_frames/EMNR_CHUNK)*EMNR_CHUNK can exceed
+                 * max_frames by up to EMNR_CHUNK-1 samples; the extra allocation
+                 * covers that entire overflow region with valid zeroed memory. */
+                self->buf[ch] = (double *)calloc(2 * (max_frames + EMNR_CHUNK), sizeof(double));
                 if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); __leave; }
 
                 nr_log("activate: creating ANR ch=%d sr=%.0f frames=%u", ch, sr, max_frames);
@@ -355,7 +439,12 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                                             120.0, 120.0, 200.0, 0.001, 6.25e-10, 1.0, 3.0);
 
                 nr_log("activate: creating EMNR ch=%d", ch);
-                self->emnr[ch] = create_emnr(0, 0, (int)max_frames,
+                /* EMNR must be created with a small fixed bsize that matches
+                 * how many samples we feed it per call.  Using max_frames here
+                 * was the NR2 silence bug: the host delivers ~480 samples per
+                 * block, but EMNR thought it was processing 8192, so the STFT
+                 * frames were almost entirely zero-padded and lambda_y stayed 0. */
+                self->emnr[ch] = create_emnr(0, 0, EMNR_CHUNK,
                                              self->buf[ch], self->buf[ch],
                                              4096, 4, (int)sr, 0, 1.0,
                                              self->emnr_gain_method,
@@ -397,7 +486,8 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 nr_log("reactivate: block size %u -> %u", self->block_size, max_frames);
                 for (int ch = 0; ch < 2; ++ch) {
                     free(self->buf[ch]);
-                    self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
+                    /* Same EMNR_CHUNK headroom as the first-activation path. */
+                    self->buf[ch] = (double *)calloc(2 * (max_frames + EMNR_CHUNK), sizeof(double));
                     if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); __leave; }
 
                     if (self->anr[ch]) {
@@ -437,7 +527,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 /* RNNR / SBNR have no flush function; zeroing the shared buffer
                  * drains their ring buffers on the next process() call. */
                 if (self->buf[ch])
-                    memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
+                    memset(self->buf[ch], 0, 2 * (self->block_size + EMNR_CHUNK) * sizeof(double));
             }
             nr_log("reactivate: flushed, sr=%.0f frames=%u", sr, max_frames);
         }
@@ -499,9 +589,11 @@ static void plugin_reset(const clap_plugin_t *p)
             if (self->emnr[ch]) flush_emnr(self->emnr[ch]);
             /* RNNR and SBNR have no flush function; zero the shared I/O
              * buffer which effectively drains their ring buffers on the
-             * next process() call. */
+             * next process() call.  Clear the full allocation (including
+             * the EMNR_CHUNK headroom) to avoid stale data in the overlap
+             * region after a block-size or sample-rate change. */
             if (self->buf[ch] && self->block_size > 0)
-                memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
+                memset(self->buf[ch], 0, 2 * (self->block_size + EMNR_CHUNK) * sizeof(double));
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -603,14 +695,18 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 self->buf[ch][2 * i + 1] = 0.0;
             }
 
-            /* Zero-pad to block_size.  EMNR, RNNR, and SBNR were created
-             * with buff_size = block_size (max_frames at activate time) and
-             * always process that many samples.  When the host delivers a
-             * shorter block (very common — e.g. 128 vs 512), padding prevents
-             * stale data from a previous call being processed, which was the
-             * primary source of digital artefacts. */
-            uint32_t blk = self->block_size;
-            for (uint32_t i = n; i < blk; ++i) {
+            /* Compute the EMNR stride ceiling before zero-padding so the
+             * same value is used for both the pad extent and the loop limit.
+             * n_rounded can exceed blk by up to EMNR_CHUNK-1 when max_frames
+             * is not a multiple of EMNR_CHUNK (e.g. 480 at 48 kHz).  The
+             * buffer was allocated with EMNR_CHUNK extra headroom exactly to
+             * cover this, making the write to buf[ch][2*blk..2*n_rounded-1]
+             * safe.  Zeroing up to pad_to ensures those extra slots hold
+             * clean zeros rather than stale output from a previous call. */
+            uint32_t blk      = self->block_size;
+            uint32_t n_rounded = ((n + EMNR_CHUNK - 1) / EMNR_CHUNK) * EMNR_CHUNK;
+            uint32_t pad_to   = (n_rounded > blk) ? n_rounded : blk;
+            for (uint32_t i = n; i < pad_to; ++i) {
                 self->buf[ch][2 * i]     = 0.0;
                 self->buf[ch][2 * i + 1] = 0.0;
             }
@@ -621,7 +717,21 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 self->anr[ch]->buff_size = (int)n;
                 xanr(self->anr[ch], 0);
             }
-            if (self->emnr[ch]) xemnr(self->emnr[ch], 0);
+            if (self->emnr[ch]) {
+                /* EMNR processes audio in fixed EMNR_CHUNK-sample strides.
+                 * buf[ch] is zero-padded to n_rounded (above) so every stride
+                 * reads only zeroed or valid audio data within the allocation. */
+                EMNR em = self->emnr[ch];
+                uint32_t pos = 0;
+                while (pos < n_rounded) {
+                    setBuffers_emnr(em, self->buf[ch] + 2 * pos,
+                                        self->buf[ch] + 2 * pos);
+                    xemnr(em, 0);
+                    pos += EMNR_CHUNK;
+                }
+                /* Restore nominal pointer for consistency */
+                setBuffers_emnr(em, self->buf[ch], self->buf[ch]);
+            }
             if (self->rnnr[ch]) xrnnr(self->rnnr[ch], 0);
             if (self->sbnr[ch]) xsbnr(self->sbnr[ch], 0);
 

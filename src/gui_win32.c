@@ -26,6 +26,7 @@
  */
 
 #include "gui.h"
+#include "version.h"
 
 #ifndef _WIN32
 /* ---- Stubs for non-Windows builds ------------------------------------ */
@@ -43,6 +44,7 @@ void gui_set_param(clap_nr_gui_t *g, clap_id id, double v) { (void)g;(void)id;(v
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #include <commctrl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +64,7 @@ enum {
 };
 
 /* ---- Layout constants (all client-area pixels) ----------------------- */
-#define GUI_W       484          /* client width                           */
+#define GUI_W       514          /* client width                           */
 #define M           12           /* outer horizontal margin                */
 #define GRP_W       (GUI_W - 2*M) /* group-box width = 460                 */
 
@@ -126,6 +128,7 @@ static int mode_client_h(int mode)
 #define IDC_COMBO_GMETHOD    121
 #define IDC_COMBO_NPE        122
 #define IDC_CHECK_AE         123
+#define IDC_BTN_ABOUT        130
 
 #define WC_CLAPNR           "ClapNrGui_v3"
 
@@ -165,6 +168,12 @@ struct clap_nr_gui_s {
     HWND lbl_npe,     combo_npe;
     HWND check_ae;
 
+    /* About button */
+    HWND  btn_about;
+
+    /* Tooltip window */
+    HWND  tt;
+
     /* Cached parameter values */
     int    nr_mode;
     int    anr_taps;
@@ -175,6 +184,20 @@ struct clap_nr_gui_s {
     int    emnr_npe_method;
     int    emnr_ae_run;
 };
+
+/* ---- Tooltip helper -------------------------------------------------- */
+static void tt_add(HWND tt, HWND ctrl, HWND parent, const char *text)
+{
+    if (!tt || !ctrl) return;
+    TOOLINFOA ti;
+    memset(&ti, 0, sizeof(ti));
+    ti.cbSize   = sizeof(ti);
+    ti.uFlags   = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd     = parent;
+    ti.uId      = (UINT_PTR)ctrl;
+    ti.lpszText = (LPSTR)text;
+    SendMessageA(tt, TTM_ADDTOOLA, 0, (LPARAM)&ti);
+}
 
 /* ---- Widget factory helpers ------------------------------------------ */
 static HWND mk_static(HWND p, const char *t, int id, int x, int y, int w, int h)
@@ -383,6 +406,19 @@ static LRESULT CALLBACK gui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int ctrl_id = LOWORD(wp);
         int notif   = HIWORD(wp);
 
+        /* About dialog */
+        if (ctrl_id == IDC_BTN_ABOUT && notif == BN_CLICKED) {
+            int r = MessageBoxA(hwnd,
+                "CLAP NR  v" CLAP_NR_VERSION_STR "\n\n"
+                "Learn more and read the credits at clapnr.com\n\n"
+                "Click Yes to open clapnr.com in your browser.",
+                "About CLAP NR",
+                MB_YESNO | MB_ICONINFORMATION);
+            if (r == IDYES)
+                ShellExecuteA(NULL, "open", "https://clapnr.com", NULL, NULL, SW_SHOWNORMAL);
+            return 0;
+        }
+
         /* NR mode radio buttons */
         if (ctrl_id >= IDC_RADIO_OFF && ctrl_id <= IDC_RADIO_NR4
                 && notif == BN_CLICKED) {
@@ -478,6 +514,13 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
     g->radio_nr3 = mk_radio(hwnd, "NR3 (RNNR)", IDC_RADIO_NR3, M+252,  ROW1_Y, 96, 22, FALSE);
     g->radio_nr4 = mk_radio(hwnd, "NR4 (SBNR)", IDC_RADIO_NR4, M+352,  ROW1_Y, 96, 22, FALSE);
 
+    /* About button -- right-aligned in the mode strip row */
+    g->btn_about = CreateWindowExA(0, "BUTTON", "?",
+                                   WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                   GUI_W - M - 28, ROW1_Y, 28, 22,
+                                   hwnd, (HMENU)(intptr_t)IDC_BTN_ABOUT,
+                                   NULL, NULL);
+
     /* NR3 and NR4 are not yet implemented */
     EnableWindow(g->radio_nr3, FALSE);
     EnableWindow(g->radio_nr4, FALSE);
@@ -532,6 +575,54 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
 
     g->check_ae = mk_check(hwnd, "Audio Enhance (AE)", IDC_CHECK_AE,
                            ROW_LBL_X, ry, 180, 22);
+
+    /* --- Tooltips ----------------------------------------------------- */
+    g->tt = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
+                            WS_POPUP | TTS_ALWAYSTIP,
+                            CW_USEDEFAULT, CW_USEDEFAULT,
+                            CW_USEDEFAULT, CW_USEDEFAULT,
+                            hwnd, NULL, GetModuleHandleA(NULL), NULL);
+    if (g->tt) {
+        /* Allow long single-line text to wrap at word boundaries */
+        SendMessageA(g->tt, TTM_SETMAXTIPWIDTH, 0, 300);
+        /* Keep tooltip visible long enough to read */
+        SendMessageA(g->tt, TTM_SETDELAYTIME, TTDT_AUTOPOP, 10000);
+
+        /* NR1 sliders */
+        tt_add(g->tt, g->sld_taps, hwnd,
+            "NR1 Taps (16-2048): Filter length of the adaptive LMS filter. "
+            "More taps = better suppression of tonal noise but higher CPU cost. "
+            "Default: 64.");
+        tt_add(g->tt, g->sld_delay, hwnd,
+            "NR1 Delay (1-512 samples): Decorrelation delay between the input and the "
+            "reference signal. Increase for narrowband carriers/tones; decrease for "
+            "broadband hiss. Default: 16.");
+        tt_add(g->tt, g->sld_gain, hwnd,
+            "NR1 Gain / two_mu (1e-6 to 0.01): LMS adaptation step size. "
+            "Higher values adapt faster but risk instability. "
+            "Lower values are more stable but slower to track changes. Default: 0.0001.");
+        tt_add(g->tt, g->sld_leak, hwnd,
+            "NR1 Leakage / gamma (0.0 to 1.0): Per-sample weight decay applied to filter "
+            "coefficients. Prevents drift when noise is stationary. "
+            "0 = no leakage (coefficients persist). Default: 0.1.");
+
+        /* NR2 controls */
+        tt_add(g->tt, g->combo_gmethod, hwnd,
+            "NR2 Gain Method: spectral gain function used after noise estimation. "
+            "RROE = Residual Output Only Estimator. "
+            "MEPSE = Minimum Error Power Spectral Estimator. "
+            "MM-LSA = Log-Spectral Amplitude (recommended, least musical noise). Default: MM-LSA.");
+        tt_add(g->tt, g->combo_npe, hwnd,
+            "NR2 NPE Method: algorithm used to estimate the noise power spectrum. "
+            "OSMS = Optimally-Smoothed Minimum Statistics (tracks noise floor quickly). "
+            "MMSE = Minimum Mean Square Error (smoother, slightly slower to adapt). Default: OSMS.");
+        tt_add(g->tt, g->check_ae, hwnd,
+            "NR2 Audio Enhance: applies a secondary gain mask after noise suppression "
+            "to sharpen transients and improve intelligibility. "
+            "Recommended: On.");
+        tt_add(g->tt, g->btn_about, hwnd,
+            "Show version and build information.");
+    }
 
     /* --- Populate values and apply initial mode visibility ------------ */
     sync_nr1_edits(g);

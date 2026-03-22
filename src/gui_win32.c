@@ -61,6 +61,7 @@ enum {
     _GUI_PARAM_EMNR_GAIN_METHOD = 6,
     _GUI_PARAM_EMNR_NPE_METHOD  = 7,
     _GUI_PARAM_EMNR_AE_RUN      = 8,
+    _GUI_PARAM_NR3_MODEL        = 9,
 };
 
 /* ---- Layout constants (all client-area pixels) ----------------------- */
@@ -103,13 +104,19 @@ enum {
 #define NR4_GRP_H   58           /* 22 header + 1xROW_H(28) + 8 pad       */
 #define H_NR4       (NR4_GRP_Y + NR4_GRP_H + 8)    /* 108 */
 
-/* Off / NR3 / NR4 -- single message line */
+/* NR3 group box */
+#define NR3_GRP_Y   CONT_Y
+#define NR3_GRP_H   58           /* 22 header + 1 radio row(28) + 8 pad   */
+#define H_NR3       (NR3_GRP_Y + NR3_GRP_H + 8)    /* 108 */
+
+/* Off -- single message line */
 #define H_SIMPLE    (CONT_Y + 42 + 8)               /* 112 */
 
 static int mode_client_h(int mode)
 {
     if (mode == 1) return H_NR1;
     if (mode == 2) return H_NR2;
+    if (mode == 3) return H_NR3;
     if (mode == 4) return H_NR4;
     return H_SIMPLE;
 }
@@ -138,6 +145,11 @@ static int mode_client_h(int mode)
 
 #define IDC_GRP_NR4          140
 #define IDC_SLD_NR4_REDUCTION 141
+
+#define IDC_GRP_NR3          150
+#define IDC_RADIO_NR3_STD    151
+#define IDC_RADIO_NR3_SMALL  152
+#define IDC_RADIO_NR3_LARGE  153
 
 #define WC_CLAPNR           "ClapNrGui_v3"
 
@@ -183,6 +195,10 @@ struct clap_nr_gui_s {
     HWND grp_nr4;
     HWND lbl_nr4_reduction, sld_nr4_reduction;
 
+    /* NR3 (RNNR) model selection */
+    HWND grp_nr3;
+    HWND radio_nr3_std, radio_nr3_small, radio_nr3_large;
+
     /* About button */
     HWND  btn_about;
 
@@ -199,6 +215,7 @@ struct clap_nr_gui_s {
     int    emnr_npe_method;
     int    emnr_ae_run;
     float  nr4_reduction;
+    int    nr3_model;  /* 0=Standard, 1=Small, 2=Large */
 };
 
 /* ---- Tooltip helper -------------------------------------------------- */
@@ -286,10 +303,6 @@ static void update_mode_message(clap_nr_gui_t *g)
         SetWindowTextA(g->lbl_msg,
             "Noise reduction disabled — audio passes through unchanged.");
         break;
-    case 3:
-        SetWindowTextA(g->lbl_msg,
-            "NR3 (RNNR) active — no adjustable parameters.");
-        break;
 
     default:
         SetWindowTextA(g->lbl_msg, "");
@@ -300,8 +313,8 @@ static void update_mode_message(clap_nr_gui_t *g)
 /* ---- Show/hide content sections for the active mode ------------------ */
 static void show_section_for_mode(clap_nr_gui_t *g, int mode)
 {
-    /* Off / NR3: single status message */
-    int simple = (mode == 0 || mode == 3);
+    /* Off: single status message */
+    int simple = (mode == 0);
     ShowWindow(g->lbl_msg, simple ? SW_SHOW : SW_HIDE);
 
     /* NR1 section */
@@ -340,6 +353,16 @@ static void show_section_for_mode(clap_nr_gui_t *g, int mode)
     for (int i = 0; nr4_all[i]; ++i)
         ShowWindow(nr4_all[i], nr4 ? SW_SHOW : SW_HIDE);
 
+    /* NR3 section */
+    int nr3 = (mode == 3);
+    HWND nr3_all[] = {
+        g->grp_nr3,
+        g->radio_nr3_std, g->radio_nr3_small, g->radio_nr3_large,
+        NULL
+    };
+    for (int i = 0; nr3_all[i]; ++i)
+        ShowWindow(nr3_all[i], nr3 ? SW_SHOW : SW_HIDE);
+
     update_mode_message(g);
     resize_to_mode(g, mode);
 }
@@ -366,6 +389,14 @@ static void sync_nr4_slider(clap_nr_gui_t *g)
     if (g->sld_nr4_reduction)
         SendMessageA(g->sld_nr4_reduction, TBM_SETPOS, TRUE,
                      reduc_to_slider(g->nr4_reduction));
+}
+
+static void sync_nr3_radios(clap_nr_gui_t *g)
+{
+    if (!g->hwnd) return;
+    int v = (g->nr3_model >= 0 && g->nr3_model <= 2) ? g->nr3_model : 2;
+    CheckRadioButton(g->hwnd, IDC_RADIO_NR3_STD, IDC_RADIO_NR3_LARGE,
+                     IDC_RADIO_NR3_STD + v);
 }
 
 /* ---- Window procedure ------------------------------------------------- */
@@ -467,6 +498,17 @@ static LRESULT CALLBACK gui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
 
+        /* NR3 model radio buttons */
+        if (ctrl_id >= IDC_RADIO_NR3_STD && ctrl_id <= IDC_RADIO_NR3_LARGE
+                && notif == BN_CLICKED) {
+            int new_model = ctrl_id - IDC_RADIO_NR3_STD;
+            if (new_model != g->nr3_model) {
+                g->nr3_model = new_model;
+                g->on_param_change(g->plugin, _GUI_PARAM_NR3_MODEL, (double)new_model);
+            }
+            return 0;
+        }
+
         /* NR2 combos and checkbox */
         if (ctrl_id == IDC_COMBO_GMETHOD && notif == CBN_SELCHANGE) {
             int v = (int)SendMessageA(g->combo_gmethod, CB_GETCURSEL, 0, 0);
@@ -557,9 +599,6 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
                                    hwnd, (HMENU)(intptr_t)IDC_BTN_ABOUT,
                                    NULL, NULL);
 
-    /* NR3 not yet implemented */
-    EnableWindow(g->radio_nr3, FALSE);
-
     mk_separator(hwnd, M, SEP_Y, GRP_W);
 
     /* --- Mode-specific message (used for Off / NR3 / NR4) ------------- */
@@ -622,6 +661,18 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
                                        ROW_SLD_X, ry, ROW_SLD_W, SLD_H,
                                        0, 200, reduc_to_slider(g->nr4_reduction));
 
+    /* --- NR3 group: RNNoise neural net (RNNR) model selection ---------- */
+    g->grp_nr3 = mk_groupbox(hwnd, "NR3 - RNNoise Neural Net (RNNR) Model",
+                             IDC_GRP_NR3, M, NR3_GRP_Y, GRP_W, NR3_GRP_H);
+
+    ry = NR3_GRP_Y + 26;
+    g->radio_nr3_std   = mk_radio(hwnd, "Standard (built-in)", IDC_RADIO_NR3_STD,
+                                  M + 10, ry, 165, 22, TRUE);
+    g->radio_nr3_small = mk_radio(hwnd, "Small",               IDC_RADIO_NR3_SMALL,
+                                  M + 185, ry, 70, 22, FALSE);
+    g->radio_nr3_large = mk_radio(hwnd, "Large",               IDC_RADIO_NR3_LARGE,
+                                  M + 265, ry, 70, 22, FALSE);
+
     /* --- Tooltips ----------------------------------------------------- */
     g->tt = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
                             WS_POPUP | TTS_ALWAYSTIP,
@@ -670,6 +721,11 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
             "NR4 Reduction (0-20 dB): Amount of noise attenuation applied by the "
             "adaptive spectral denoiser. Higher values suppress more noise but "
             "may affect speech clarity. Default: 10 dB.");
+        tt_add(g->tt, g->grp_nr3, hwnd,
+            "NR3 Model: select the RNNoise neural network weight file used for "
+            "noise suppression. Standard uses the model built into the DLL. "
+            "Small and Large load an external .bin file from the CLAP install folder. "
+            "Larger models give stronger suppression at higher CPU cost.");
         tt_add(g->tt, g->btn_about, hwnd,
             "Show version and build information.");
     }
@@ -678,6 +734,7 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
     sync_nr1_edits(g);
     sync_nr2_combos(g);
     sync_nr4_slider(g);
+    sync_nr3_radios(g);
     CheckRadioButton(hwnd, IDC_RADIO_OFF, IDC_RADIO_NR4,
                      IDC_RADIO_OFF + g->nr_mode);
     show_section_for_mode(g, g->nr_mode);
@@ -700,6 +757,7 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change)
     g->emnr_npe_method  = 0;  /* OSMS   */
     g->emnr_ae_run      = 1;
     g->nr4_reduction    = 10.0f;
+    g->nr3_model        = 2;  /* Large */
     return g;
 }
 
@@ -858,6 +916,10 @@ void gui_set_param(clap_nr_gui_t *gui, clap_id param_id, double value)
     case _GUI_PARAM_NR4_REDUCTION:
         gui->nr4_reduction = (float)value;
         if (gui->hwnd) sync_nr4_slider(gui);
+        break;
+    case _GUI_PARAM_NR3_MODEL:
+        gui->nr3_model = (int)value;
+        if (gui->hwnd) sync_nr3_radios(gui);
         break;
     default:
         break;

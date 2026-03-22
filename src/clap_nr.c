@@ -21,7 +21,7 @@
  *   0 = off
  *   1 = NR1  (ANR  - Adaptive LMS)
  *   2 = NR2  (EMNR - Spectral MMSE)
- *   3 = NR3  (RNNR - RNNoise neural net)   [UI disabled for now]
+ *   3 = NR3  (RNNR - RNNoise neural net)
  *   4 = NR4  (SBNR - libspecbleach)        [UI disabled for now]
  *
  * Extensions implemented:
@@ -94,13 +94,16 @@ enum {
     PARAM_EMNR_NPE_METHOD   = 7,  /* 0=OSMS, 1=MMSE           (stepped)       */
     PARAM_EMNR_AE_RUN       = 8,  /* 0=off,  1=on             (stepped)       */
 
+    /* NR3 - RNNoise neural net (RNNR) */
+    PARAM_NR3_MODEL         = 9,  /* 0=Standard, 1=Small, 2=Large (stepped)   */
+
     PARAM_COUNT
 };
 
 /* -----------------------------------------------------------------------
  * State save/load format  (bump version when layout changes)
  * --------------------------------------------------------------------- */
-#define STATE_VERSION  1U
+#define STATE_VERSION  2U
 
 typedef struct {
     uint32_t version;
@@ -113,6 +116,7 @@ typedef struct {
     int32_t  emnr_gain_method;
     int32_t  emnr_npe_method;
     int32_t  emnr_ae_run;
+    int32_t  nr3_model;       /* new in v2: 0=Standard, 1=Small, 2=Large */
 } clap_nr_state_t;
 
 /* -----------------------------------------------------------------------
@@ -155,6 +159,7 @@ typedef struct {
     int    emnr_gain_method;
     int    emnr_npe_method;
     int    emnr_ae_run;
+    int    nr3_model;  /* 0=Standard (built-in), 1=Small, 2=Large */
 
     /* ---- GUI ---- */
     clap_nr_gui_t *gui;
@@ -169,6 +174,7 @@ typedef struct {
      * state is only ever modified from the audio thread, eliminating
      * the race between the GUI/main thread and the audio thread. */
     bool params_dirty;
+    bool nr3_model_dirty;  /* set when nr3_model changes; triggers RNNRloadModel */
 
     /* True between a successful activate() and the subsequent deactivate().
      * process() checks this flag and does passthrough if false, guarding
@@ -319,6 +325,42 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
 /* -----------------------------------------------------------------------
  * Helper: dispatch a single incoming CLAP param event
  * --------------------------------------------------------------------- */
+/* -----------------------------------------------------------------------
+ * Helper: load the NR3 (RNNR) model file matching self->nr3_model.
+ * 0 = built-in  (NULL model)
+ * 1 = rnnoise_weights_small.bin  (beside the .clap)
+ * 2 = rnnoise_weights_large.bin  (beside the .clap)
+ * If the file cannot be found, falls back to the built-in model silently.
+ * --------------------------------------------------------------------- */
+static void apply_nr3_model(clap_nr_t *self)
+{
+    if (self->nr3_model == 0) {
+        RNNRloadModel(NULL);
+        return;
+    }
+    char path[MAX_PATH];
+    HMODULE hmod = GetModuleHandleA("clap-nr.clap");
+    if (!hmod || !GetModuleFileNameA(hmod, path, MAX_PATH)) {
+        RNNRloadModel(NULL);
+        return;
+    }
+    char *slash = strrchr(path, '\\');
+    if (!slash) { RNNRloadModel(NULL); return; }
+    *(slash + 1) = '\0';
+    const char *fname = (self->nr3_model == 1)
+                        ? "rnnoise_weights_small.bin"
+                        : "rnnoise_weights_large.bin";
+    size_t dlen = strlen(path);
+    size_t flen = strlen(fname);
+    if (dlen + flen < MAX_PATH)
+        memcpy(path + dlen, fname, flen + 1);
+    else {
+        RNNRloadModel(NULL);
+        return;
+    }
+    RNNRloadModel(path);
+}
+
 static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *pv)
 {
     /* Update only the cached parameter values.  Do NOT call apply_*() here.
@@ -336,6 +378,10 @@ static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *
     case PARAM_EMNR_GAIN_METHOD: self->emnr_gain_method = (int)pv->value;  break;
     case PARAM_EMNR_NPE_METHOD:  self->emnr_npe_method  = (int)pv->value;  break;
     case PARAM_EMNR_AE_RUN:      self->emnr_ae_run      = (int)pv->value;  break;
+    case PARAM_NR3_MODEL:
+        self->nr3_model  = (int)pv->value;
+        self->nr3_model_dirty = true;
+        break;
     default: break;
     }
     self->params_dirty = true;
@@ -683,6 +729,10 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         apply_emnr_params(self);
         for (int _ch = 0; _ch < 2; ++_ch)
             if (self->sbnr[_ch]) self->sbnr[_ch]->reduction_amount = self->nr4_reduction;
+        if (self->nr3_model_dirty) {
+            apply_nr3_model(self);
+            self->nr3_model_dirty = false;
+        }
         self->params_dirty = false;
     }
 
@@ -793,7 +843,10 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                     }
                 }
             }
-            if (self->rnnr[ch]) xrnnr(self->rnnr[ch], 0);
+            if (self->rnnr[ch]) {
+                self->rnnr[ch]->buffer_size = (int)n;
+                xrnnr(self->rnnr[ch], 0);
+            }
             if (self->sbnr[ch]) {
                 /* Update buffer_size to the actual host frame count every call,
                  * just like ANR does with buff_size.  Without this, xsbnr loops
@@ -896,6 +949,13 @@ static bool params_get_info(const clap_plugin_t *p, uint32_t idx, clap_param_inf
         snprintf(info->module, sizeof(info->module), "NR2");
         info->min_value = 0; info->max_value = 1; info->default_value = 1;
         return true;
+    case PARAM_NR3_MODEL:
+        info->id = PARAM_NR3_MODEL;
+        info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
+        snprintf(info->name,   sizeof(info->name),   "NR3 Model");
+        snprintf(info->module, sizeof(info->module), "NR3");
+        info->min_value = 0; info->max_value = 2; info->default_value = 2;
+        return true;
     default: return false;
     }
 }
@@ -913,6 +973,7 @@ static bool params_get_value(const clap_plugin_t *p, clap_id id, double *out)
     case PARAM_EMNR_GAIN_METHOD: *out = (double)self->emnr_gain_method;  return true;
     case PARAM_EMNR_NPE_METHOD:  *out = (double)self->emnr_npe_method;   return true;
     case PARAM_EMNR_AE_RUN:      *out = (double)self->emnr_ae_run;       return true;
+    case PARAM_NR3_MODEL:        *out = (double)self->nr3_model;         return true;
     default: return false;
     }
 }
@@ -948,6 +1009,11 @@ static bool params_value_to_text(const clap_plugin_t *p, clap_id id, double val,
         return true; }
     case PARAM_EMNR_AE_RUN:
         snprintf(buf, size, "%s", (int)val ? "On" : "Off"); return true;
+    case PARAM_NR3_MODEL: {
+        static const char *names[] = { "Standard", "Small", "Large" };
+        int i = (int)val;
+        snprintf(buf, size, "%s", (i >= 0 && i <= 2) ? names[i] : "?");
+        return true; }
     default: return false;
     }
 }
@@ -1041,6 +1107,7 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *stream)
     s.emnr_gain_method  = self->emnr_gain_method;
     s.emnr_npe_method   = self->emnr_npe_method;
     s.emnr_ae_run       = self->emnr_ae_run;
+    s.nr3_model         = self->nr3_model;
     return stream->write(stream, &s, sizeof(s)) == (int64_t)sizeof(s);
 }
 
@@ -1049,7 +1116,8 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     clap_nr_t *self = (clap_nr_t *)p;
     clap_nr_state_t s;
     if (stream->read(stream, &s, sizeof(s)) != (int64_t)sizeof(s)) return false;
-    if (s.version != STATE_VERSION) return false;
+    /* Accept both v1 (nr3_model field was trailing padding, ignore it) and v2. */
+    if (s.version != 1U && s.version != STATE_VERSION) return false;
 
     self->nr4_reduction     = s.nr4_reduction;
     self->anr_taps          = (s.anr_taps  >= 16  && s.anr_taps  <= 2048) ? s.anr_taps  : 64;
@@ -1060,9 +1128,16 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     self->emnr_npe_method   = (s.emnr_npe_method  >= 0 && s.emnr_npe_method  <= 1) ? s.emnr_npe_method  : 0;
     self->emnr_ae_run       = (s.emnr_ae_run == 0 || s.emnr_ae_run == 1) ? s.emnr_ae_run : 1;
 
+    /* nr3_model: only trust the field from v2 onwards; v1 trailing bytes are garbage */
+    if (s.version >= 2U)
+        self->nr3_model = (s.nr3_model >= 0 && s.nr3_model <= 2) ? s.nr3_model : 2;
+    else
+        self->nr3_model = 2;  /* default Large for upgraded v1 states */
+
     apply_nr_mode(self, (s.nr_mode >= 0 && s.nr_mode <= 4) ? s.nr_mode : 0);
     apply_anr_params(self);
     apply_emnr_params(self);
+    apply_nr3_model(self);
 
     if (self->gui) {
         gui_set_param(self->gui, PARAM_NR_MODE,          (double)self->nr_mode);
@@ -1073,6 +1148,7 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
         gui_set_param(self->gui, PARAM_EMNR_GAIN_METHOD, (double)self->emnr_gain_method);
         gui_set_param(self->gui, PARAM_EMNR_NPE_METHOD,  (double)self->emnr_npe_method);
         gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
+        gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
     }
     return true;
 }

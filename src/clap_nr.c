@@ -1262,7 +1262,7 @@ static bool params_get_value(const clap_plugin_t *p, clap_id id, double *out)
     }
 }
 
-static const char *nr_mode_names[]         = { "Off", "NR1 (ANR)", "NR2 (EMNR)", "NR3 (RNNR)", "NR4 (SBNR)" };
+static const char *nr_mode_names[]         = { "Off", "NR 1", "NR 2", "NR 3", "NR 4" };
 static const char *emnr_gain_method_names[]= { "RROE", "MEPSE", "MM-LSA" };
 static const char *emnr_npe_method_names[] = { "OSMS", "MMSE" };
 

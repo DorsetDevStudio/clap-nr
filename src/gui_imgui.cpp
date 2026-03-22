@@ -56,7 +56,6 @@
 #    include <OpenGL/gl3.h>
 #  else
 #    include <GL/gl.h>
-#    include <X11/Xlib.h>   /* XInitThreads() */
 #  endif
 #  include "imgui_impl_glfw.h"
 #  include "imgui_impl_opengl3.h"
@@ -937,11 +936,6 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
 static void *glfw_render_thread(void *arg)
 {
     clap_nr_gui_s *g = (clap_nr_gui_s *)arg;
-
-#ifdef __linux__
-    /* Allow Xlib calls from this non-main thread. */
-    XInitThreads();
-#endif
 
     if (!glfwInit()) {
         g->thread_ready = true;

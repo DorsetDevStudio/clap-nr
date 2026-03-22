@@ -46,8 +46,13 @@
 #  include <dlfcn.h>
 #  include <unistd.h>
 #  include <limits.h>
+#  include <time.h>
+#  include <sched.h>
 #  ifndef PATH_MAX
 #    define PATH_MAX 4096
+#  endif
+#  ifdef __linux__
+#    include <X11/Xlib.h>   /* XInitThreads() */
 #  endif
 #endif
 #include "fftw3.h"
@@ -592,7 +597,9 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
     (void)min_frames;
 
     bool ok = false;
+#ifdef _WIN32
     __try {
+#endif
         if (self->buf[0] == NULL) {
             /* ---- First activation: allocate buffers and create NR instances ---- */
             self->sample_rate = sr;
@@ -600,7 +607,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
 
             for (int ch = 0; ch < 2; ++ch) {
                 self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
-                if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); __leave; }
+                if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); goto activate_done; }
 
                 nr_log("activate: creating ANR ch=%d sr=%.0f frames=%u", ch, sr, max_frames);
                 self->anr[ch]  = create_anr(0, 0, (int)max_frames,
@@ -649,7 +656,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                     nr_log("activate: create_* returned NULL ch=%d anr=%p emnr=%p rnnr=%p sbnr=%p",
                            ch, (void*)self->anr[ch], (void*)self->emnr[ch],
                            (void*)self->rnnr[ch], (void*)self->sbnr[ch]);
-                    __leave;
+                    goto activate_done;
                 }
             }
         } else {
@@ -673,7 +680,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 for (int ch = 0; ch < 2; ++ch) {
                     free(self->buf[ch]);
                     self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
-                    if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); __leave; }
+                    if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); goto activate_done; }
 
                     if (self->anr[ch]) {
                         setSize_anr   (self->anr[ch],  (int)max_frames);
@@ -747,6 +754,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
         apply_nr_mode(self, self->nr_mode);
         nr_log("activate: success mode=%d", self->nr_mode);
         ok = true;
+#ifdef _WIN32
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         nr_log("activate: SEH exception 0x%08lX -- NR disabled",
@@ -759,7 +767,8 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
         self->nr_mode = 0;
         ok = true;
     }
-
+#endif /* _WIN32 */
+activate_done:
     if (ok) self->active = true;
     return ok;
 }
@@ -1816,6 +1825,12 @@ static bool entry_init(const char *path)
     }
 #else
     (void)path;  /* Unix: shared-library dependencies resolved by the dynamic linker */
+#  ifdef __linux__
+    /* XInitThreads() must be the very first Xlib call in the process.  Call
+     * it here on the main thread, before any host or plugin code touches X11.
+     * This is idempotent if the host has already called it. */
+    XInitThreads();
+#  endif
 #endif
     return true;
 }

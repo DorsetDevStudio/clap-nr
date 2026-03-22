@@ -47,11 +47,11 @@ if(WIN32)
         ${IMGUI_DIR}/imgui_impl_dx11.cpp
     )
 elseif(APPLE)
-    # macOS: Cocoa platform layer + Metal renderer
+    # macOS: GLFW platform layer + OpenGL 3.3 renderer (same as Linux)
     list(APPEND IMGUI_SOURCES
         ${IMGUI_CORE_SOURCES}
-        ${IMGUI_DIR}/imgui_impl_osx.mm
-        ${IMGUI_DIR}/imgui_impl_metal.mm
+        ${IMGUI_DIR}/imgui_impl_glfw.cpp
+        ${IMGUI_DIR}/imgui_impl_opengl3.cpp
     )
 else()
     # Linux: GLFW platform layer + OpenGL 3 renderer
@@ -110,15 +110,14 @@ if(WIN32)
     target_compile_definitions(clap-nr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX CLAP_NR_STANDALONE=1)
 
 elseif(APPLE)
-    # --- macOS: system or Homebrew libraries --------------------------------
+    # --- macOS: Homebrew libraries + GLFW/OpenGL for GUI -----------------
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FFTW3   REQUIRED fftw3)
     pkg_check_modules(RNNOISE REQUIRED rnnoise)
     # libspecbleach may not have a pkg-config entry; try find_library fallback
     find_library(SPECBLEACH_LIB NAMES specbleach REQUIRED)
-    find_library(METAL_LIB      Metal       REQUIRED)
-    find_library(COCOA_LIB      Cocoa       REQUIRED)
-    find_library(QUARTZCORE_LIB QuartzCore  REQUIRED)
+    find_package(glfw3   REQUIRED)
+    find_package(OpenGL  REQUIRED)
 
     target_include_directories(clap-nr PRIVATE
         ${FFTW3_INCLUDE_DIRS}
@@ -128,9 +127,9 @@ elseif(APPLE)
         ${FFTW3_LIBRARIES}
         ${RNNOISE_LIBRARIES}
         ${SPECBLEACH_LIB}
-        ${METAL_LIB}
-        ${COCOA_LIB}
-        ${QUARTZCORE_LIB}
+        glfw
+        OpenGL::GL
+        pthread
     )
     target_compile_definitions(clap-nr PRIVATE CLAP_NR_STANDALONE=1)
     # Hide all symbols by default; only CLAP_EXPORT entry point is visible

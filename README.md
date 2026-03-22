@@ -253,9 +253,8 @@ clap-nr/
 
 ## Licence
 
-This project is distributed under the **GNU General Public License v2**
-(or, at your option, any later version). See [LICENSE](LICENSE) for the
-full text.
+This project is distributed under the **GNU General Public License v2**.
+See [LICENSE](LICENSE) for the full text.
 
 This licence is inherited from the upstream DSP sources. All third-party
 copyright notices are preserved in full in

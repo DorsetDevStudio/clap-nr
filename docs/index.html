@@ -160,14 +160,6 @@
       margin-bottom: 0;
     }
 
-    .mode-card .coming-soon {
-      display: block;
-      font-size: 0.82rem;
-      font-style: italic;
-      color: var(--muted);
-      margin-top: 6px;
-    }
-
     /* ── Table ────────────────────────────────────────────────── */
     table {
       width: 100%;
@@ -385,14 +377,12 @@
       <div class="mode-card">
         <div class="nr-label">NR3</div>
         <h4>RNNR</h4>
-        <p>RNNoise recurrent neural network denoiser.</p>
-        <span class="coming-soon">Coming soon</span>
+        <p>RNNoise recurrent neural network denoiser. Choose from Standard (built-in), Small, or Large model; adjust suppression strength to taste.</p>
       </div>
       <div class="mode-card">
         <div class="nr-label">NR4</div>
         <h4>SBNR</h4>
-        <p>libspecbleach adaptive spectral denoiser.</p>
-        <span class="coming-soon">Coming soon</span>
+        <p>libspecbleach adaptive spectral denoiser. Simple single-knob reduction control.</p>
       </div>
     </div>
 
@@ -418,6 +408,27 @@
         <tr><td>Gain Method</td><td>RROE / MEPSE / MM-LSA</td><td>Spectral gain estimation algorithm (MM-LSA recommended)</td></tr>
         <tr><td>NPE Method</td><td>OSMS / MMSE</td><td>Noise power estimation method</td></tr>
         <tr><td>Audio Enhance</td><td>On / Off</td><td>Post-filter musical noise suppression</td></tr>
+      </tbody>
+    </table>
+
+    <h3>NR3 parameters</h3>
+    <table>
+      <thead>
+        <tr><th>Parameter</th><th>Options / Range</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Model</td><td>Standard / Small / Large</td><td>RNNoise neural network weights. Standard is built into the DLL; Small and Large load an external <code>.bin</code> file from the install folder. Larger models give stronger suppression at higher CPU cost.</td></tr>
+        <tr><td>Suppression</td><td>0 - 100 %</td><td>Blends the denoised output with the original dry signal. 100 % = full denoising; 0 % = bypass. Reduce if the denoiser removes too much signal content. Default: 100 %.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>NR4 parameters</h3>
+    <table>
+      <thead>
+        <tr><th>Parameter</th><th>Range</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Reduction</td><td>0 - 20 dB</td><td>Amount of spectral noise attenuation. Higher values suppress more noise but may affect speech clarity. Default: 10 dB.</td></tr>
       </tbody>
     </table>
   </section>

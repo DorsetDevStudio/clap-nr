@@ -690,13 +690,43 @@ static void render_frame(clap_nr_gui_s *g)
         ImGuiCond_Always, {0.5f, 0.5f});
     if (ImGui::BeginPopupModal("About##popup", nullptr,
             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+        /* Compact item spacing for the whole popup */
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {ImGui::GetStyle().ItemSpacing.x, 3.0f});
+
         ImGui::Text("CLAP NR  v" CLAP_NR_VERSION_STR);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_MUTED);
+        ImGui::TextUnformatted("Algorithms: Warren Pratt NR0V / Richard Samphire MW0LGE");
+        ImGui::PopStyleColor();
+
         ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::PushTextWrapPos(300.0f);
-        ImGui::TextUnformatted("Learn more and read the full credits at clapnr.com");
-        ImGui::PopTextWrapPos();
-        ImGui::Spacing();
+
+        /* Library table: name | licence */
+        ImGui::BeginTable("##about_libs", 2, ImGuiTableFlags_None, {340.0f, 0});
+        ImGui::TableSetupColumn("lib", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("lic", ImGuiTableColumnFlags_WidthFixed, 82.0f);
+
+        auto lib_row = [](const char *name, const char *lic) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(name);
+            ImGui::TableSetColumnIndex(1);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.47f, 0.55f, 0.60f, 1.0f));
+            ImGui::TextUnformatted(lic);
+            ImGui::PopStyleColor();
+        };
+
+        lib_row("Dear ImGui " IMGUI_VERSION, "MIT");
+        lib_row("FFTW3",                     "GPL v2");
+        lib_row("RNNoise",                   "BSD 3-clause");
+        lib_row("libspecbleach",             "GPL v2");
+        lib_row("CLAP SDK",                  "MIT");
+
+        ImGui::EndTable();
+
+        ImGui::Separator();
+
+        ImGui::PopStyleVar(); /* ItemSpacing */
+
         if (ImGui::Button("Visit clapnr.com", {160, 0})) {
             g->open_website = true;
             ImGui::CloseCurrentPopup();

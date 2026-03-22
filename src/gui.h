@@ -43,6 +43,12 @@ typedef struct clap_nr_gui_s clap_nr_gui_t;
  */
 typedef void (*gui_param_cb_t)(void *plugin, clap_id param_id, double value);
 
+/*
+ * Callback invoked on the main thread when the user toggles the Tips button.
+ * The plugin should update its persisted tooltips_on field and mark state dirty.
+ */
+typedef void (*gui_tooltips_cb_t)(void *plugin, bool tooltips_on);
+
 /* -----------------------------------------------------------------------
  * Lifecycle
  * --------------------------------------------------------------------- */
@@ -50,6 +56,7 @@ typedef void (*gui_param_cb_t)(void *plugin, clap_id param_id, double value);
 /* Allocate GUI resources.  The window may not be visible yet.
  * title is used as the floating window caption (e.g. "Host  |  Plugin"). */
 clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
+                           gui_tooltips_cb_t on_tooltips_change,
                            const char *title);
 
 /* Free all GUI resources.  Called after gui_hide(). */
@@ -87,6 +94,9 @@ bool     gui_resize(clap_nr_gui_t *gui, uint32_t w, uint32_t h);
  * without triggering on_param_change (avoids feedback loops).
  * --------------------------------------------------------------------- */
 void     gui_set_param(clap_nr_gui_t *gui, clap_id param_id, double value);
+
+/* Push the persisted tooltips_on state into the GUI (plugin -> GUI). */
+void     gui_set_tooltips(clap_nr_gui_t *gui, bool on);
 
 #ifdef __cplusplus
 } /* extern "C" */

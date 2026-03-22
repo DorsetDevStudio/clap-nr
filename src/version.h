@@ -14,7 +14,7 @@
 
 #define CLAP_NR_VERSION_MAJOR  1
 #define CLAP_NR_VERSION_MINOR  0
-#define CLAP_NR_VERSION_PATCH  1
+#define CLAP_NR_VERSION_PATCH  2
 
 /* Stringification helpers */
 #define CLAP_NR_STR_(x)  #x

@@ -63,7 +63,6 @@
 #endif
 
 #include <stdio.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -158,8 +157,9 @@ static void apply_theme()
  * --------------------------------------------------------------------- */
 struct clap_nr_gui_s {
     /* Ownership */
-    void           *plugin;
-    gui_param_cb_t  on_param_change;
+    void               *plugin;
+    gui_param_cb_t      on_param_change;
+    gui_tooltips_cb_t   on_tooltips_change;
 
 #ifdef _WIN32
     /* Window / D3D11 (Windows) */
@@ -218,7 +218,7 @@ struct clap_nr_gui_s {
 /* -----------------------------------------------------------------------
  * Fixed logical size (pre-DPI; scaled by ImGui font/DPI internally)
  * --------------------------------------------------------------------- */
-#define GUI_BASE_W  580
+#define GUI_BASE_W  750
 #define GUI_BASE_H  230   /* height adapts per-mode at runtime */
 
 /* -----------------------------------------------------------------------
@@ -380,7 +380,7 @@ static void render_frame(clap_nr_gui_s *g)
     double new_val = 0.0;
 
     /* ---- Mode strip -------------------------------------------------- */
-    const char *mode_labels[] = { "None", "NR1 (ANR)", "NR2 (EMNR)", "NR3 (RNNR)", "NR4 (SBNR)" };
+    const char *mode_labels[] = { "NR Off", "NR 1", "NR 2", "NR 3", "NR 4" };
 
     /* Compute minimum window width from the header row every frame.
      * Sum: WindowPadding*2 + 5 mode buttons + spacing between them
@@ -426,8 +426,11 @@ static void render_frame(clap_nr_gui_s *g)
         float total   = tips_w + sp + about_w;
         ImGui::SameLine(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - total);
         const char *tips_lbl = g->tooltips_on ? "Tips: ON " : "Tips: OFF";
-        if (ImGui::Button(tips_lbl, {tips_w, 0}))
+        if (ImGui::Button(tips_lbl, {tips_w, 0})) {
             g->tooltips_on = !g->tooltips_on;
+            if (g->on_tooltips_change)
+                g->on_tooltips_change(g->plugin, g->tooltips_on);
+        }
         ImGui::SameLine();
         if (ImGui::Button("?", {about_w, 0}))
             ImGui::OpenPopup("About##popup");
@@ -442,7 +445,27 @@ static void render_frame(clap_nr_gui_s *g)
     if (g->nr_mode == 0) {
         ImGui::PushStyleColor(ImGuiCol_Text, COL_MUTED);
         ImGui::TextWrapped("Noise reduction disabled - audio passes through unchanged.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
         ImGui::PopStyleColor();
+
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+        ImGui::TextUnformatted("Available modes:");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        ImGui::BulletText("NR 1  Adaptive LMS notch filter. Fast, low-latency. Best for "
+                          "carriers and tones.");
+        ImGui::Spacing();
+        ImGui::BulletText("NR 2  Spectral subtraction (EMNR). Broadband noise floor "
+                          "reduction. Best for white/band noise.");
+        ImGui::Spacing();
+        ImGui::BulletText("NR 3  RNNoise neural network denoiser. AI-based, excellent on "
+                          "speech and mic noise.");
+        ImGui::Spacing();
+        ImGui::BulletText("NR 4  SpecBleach adaptive denoiser. Broadband, with adjustable "
+                          "suppression strength.");
     }
 
     /* -- NR1 (ANR) ------------------------------------------------------ */
@@ -716,34 +739,6 @@ static void render_frame(clap_nr_gui_s *g)
 }
 
 /* -----------------------------------------------------------------------
- * GUI-side log helper (writes to the same log file as nr_log in clap_nr.c)
- * --------------------------------------------------------------------- */
-static void gui_log(const char *fmt, ...)
-{
-#ifdef _WIN32
-    char path[MAX_PATH];
-    DWORD n = GetTempPathA(MAX_PATH, path);
-    if (n == 0 || n >= MAX_PATH) return;
-    strncat_s(path, MAX_PATH, "clap-nr.log", _TRUNCATE);
-    FILE *f = NULL;
-    if (fopen_s(&f, path, "a") != 0 || !f) return;
-#else
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !tmp[0]) tmp = "/tmp";
-    char path[4096];
-    snprintf(path, sizeof(path), "%s/clap-nr.log", tmp);
-    FILE *f = fopen(path, "a");
-    if (!f) return;
-#endif
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
-
-/* -----------------------------------------------------------------------
  * Win32 cleanup helper  (Windows only)
  *
  * Idempotent: safe to call from WM_DESTROY (fired when the host destroys
@@ -756,8 +751,6 @@ static void gui_log(const char *fmt, ...)
 static void gui_win32_cleanup(clap_nr_gui_s *g)
 {
     if (!g) return;
-    gui_log("gui_win32_cleanup: entry  hwnd=%s  d3d=%s",
-            g->hwnd ? "yes" : "null", g->d3d_device ? "yes" : "null");
     if (g->timer_id) {
         if (g->hwnd) KillTimer(g->hwnd, g->timer_id);
         g->timer_id = 0;
@@ -1031,12 +1024,14 @@ static bool wait_for_thread_ready(clap_nr_gui_s *g)
  * --------------------------------------------------------------------- */
 
 clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
+                          gui_tooltips_cb_t on_tooltips_change,
                           const char *title)
 {
     auto *g = (clap_nr_gui_s *)calloc(1, sizeof(clap_nr_gui_s));
     if (!g) return nullptr;
-    g->plugin          = plugin;
-    g->on_param_change = on_param_change;
+    g->plugin              = plugin;
+    g->on_param_change     = on_param_change;
+    g->on_tooltips_change  = on_tooltips_change;
     strncpy(g->window_title, (title && title[0]) ? title : "CLAP NR", 255);
     g->window_title[255] = '\0';
     /* Defaults matching factory_create_plugin in clap_nr.c */
@@ -1060,7 +1055,6 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
 void gui_destroy(clap_nr_gui_t *gui)
 {
     if (!gui) return;
-    gui_log("gui_destroy: entry  hwnd=%s", gui->hwnd ? "yes" : "null");
 #ifdef _WIN32
     {
         /* gui_win32_cleanup is idempotent: if WM_DESTROY already ran (because
@@ -1081,7 +1075,6 @@ void gui_destroy(clap_nr_gui_t *gui)
         pthread_join(gui->render_thread, nullptr);
     }
 #endif
-    gui_log("gui_destroy: freeing");
     free(gui);
 }
 
@@ -1124,7 +1117,6 @@ void gui_suggest_title(clap_nr_gui_t *gui, const char *title)
 bool gui_set_parent(clap_nr_gui_t *gui, const clap_window_t *window)
 {
     if (!gui || !window) return false;
-    gui_log("gui_set_parent: entry");
 #ifdef _WIN32
     gui->embedded = true;
     HWND parent = (HWND)window->win32;
@@ -1133,11 +1125,9 @@ bool gui_set_parent(clap_nr_gui_t *gui, const clap_window_t *window)
     int h = rc.bottom - rc.top;
     if (w < GUI_BASE_W) w = GUI_BASE_W;
     if (h < GUI_BASE_H) h = GUI_BASE_H;
-    bool ok = create_window_and_imgui(gui, parent,
-                                       0, 0, w, h,
-                                       WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0);
-    gui_log("gui_set_parent: result=%d", (int)ok);
-    return ok;
+    return create_window_and_imgui(gui, parent,
+                                   0, 0, w, h,
+                                   WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0);
 #else
     /* GLFW does not support parenting into an arbitrary X11/Cocoa window.
      * Return false so the host falls back to floating mode. */
@@ -1156,8 +1146,6 @@ void gui_get_size(clap_nr_gui_t *gui, uint32_t *out_w, uint32_t *out_h)
 bool gui_show(clap_nr_gui_t *gui)
 {
     if (!gui) return false;
-    gui_log("gui_show: entry  hwnd=%s  embedded=%d",
-            gui->hwnd ? "yes" : "null", (int)gui->embedded);
 #ifdef _WIN32
     if (!gui->hwnd) {
         /* Floating window.
@@ -1199,7 +1187,6 @@ bool gui_show(clap_nr_gui_t *gui)
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         SetForegroundWindow(gui->hwnd);
     }
-    gui_log("gui_show: returning true");
     return true;
 
 #else  /* Linux / macOS */
@@ -1223,7 +1210,6 @@ bool gui_show(clap_nr_gui_t *gui)
 bool gui_hide(clap_nr_gui_t *gui)
 {
     if (!gui) return false;
-    gui_log("gui_hide: entry");
 #ifdef _WIN32
     if (!gui->hwnd) return false;
     ShowWindow(gui->hwnd, SW_HIDE);
@@ -1272,5 +1258,11 @@ void gui_set_param(clap_nr_gui_t *gui, clap_id param_id, double value)
     }
     gui->updating = false;
     /* No explicit redraw needed; the 60 fps timer will catch the next frame */
+}
+
+void gui_set_tooltips(clap_nr_gui_t *gui, bool on)
+{
+    if (!gui) return;
+    gui->tooltips_on = on;
 }
 

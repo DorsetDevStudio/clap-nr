@@ -114,7 +114,7 @@ enum {
 /* -----------------------------------------------------------------------
  * State save/load format  (bump version when layout changes)
  * --------------------------------------------------------------------- */
-#define STATE_VERSION  3U
+#define STATE_VERSION  4U
 
 typedef struct {
     uint32_t version;
@@ -129,6 +129,7 @@ typedef struct {
     int32_t  emnr_ae_run;
     int32_t  nr3_model;       /* new in v2: 0=Standard, 1=Small, 2=Large */
     float    nr3_strength;    /* new in v3: 0.0=bypass, 1.0=full         */
+    uint32_t tooltips_on;     /* new in v4: 1=tips enabled, 0=disabled   */
 } clap_nr_state_t;
 
 /* -----------------------------------------------------------------------
@@ -186,6 +187,7 @@ typedef struct {
     /* ---- GUI ---- */
     clap_nr_gui_t *gui;
     bool           gui_floating;
+    bool           tooltips_on;   /* persisted UI preference */
 
     /* Pending param->host notification (set by GUI, cleared by flush) */
     bool param_dirty[PARAM_COUNT];
@@ -477,15 +479,25 @@ static void on_gui_param_change(void *plugin_ptr, clap_id param_id, double value
     if (hp) hp->request_flush(self->host);
 }
 
+static void on_gui_tooltips_change(void *plugin_ptr, bool tooltips_on)
+{
+    clap_nr_t *self   = (clap_nr_t *)plugin_ptr;
+    self->tooltips_on = tooltips_on;
+
+    /* Notify the host that our state has changed so it will re-save it. */
+    const clap_host_state_t *hs =
+        (const clap_host_state_t *)self->host->get_extension(self->host, CLAP_EXT_STATE);
+    if (hs) hs->mark_dirty(self->host);
+}
+
 /* -----------------------------------------------------------------------
  * Plugin vtable
  * --------------------------------------------------------------------- */
-static bool plugin_init(const clap_plugin_t *p) { (void)p; nr_log("plugin_init"); return true; }
+static bool plugin_init(const clap_plugin_t *p) { (void)p; return true; }
 
 static void plugin_destroy(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
-    nr_log("plugin_destroy: entry");
 
     /* Guard against hosts that call destroy() without a prior deactivate().
      * Setting active=false and draining process_depth ensures that
@@ -532,26 +544,17 @@ static void plugin_destroy(const clap_plugin_t *p)
     }
 #endif
 
-    nr_log("plugin_destroy: drain complete");
     if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
 
     for (int ch = 0; ch < 2; ++ch) {
-        nr_log("plugin_destroy: ch=%d  destroying DSP", ch);
-        if (self->anr[ch])  { nr_log("plugin_destroy: ch=%d  destroy_anr", ch);
-                               destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
-        if (self->emnr[ch]) { nr_log("plugin_destroy: ch=%d  destroy_emnr", ch);
-                               destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
-        if (self->rnnr[ch]) { nr_log("plugin_destroy: ch=%d  destroy_rnnr", ch);
-                               destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
-        if (self->sbnr[ch]) { nr_log("plugin_destroy: ch=%d  destroy_sbnr", ch);
-                               destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
-        nr_log("plugin_destroy: ch=%d  free buf", ch);
+        if (self->anr[ch])  { destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
+        if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
+        if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
+        if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
         free(self->buf[ch]); self->buf[ch] = NULL;
     }
 
-    nr_log("plugin_destroy: free self");
     free(self);
-    nr_log("plugin_destroy: done");
 }
 
 /* -----------------------------------------------------------------------
@@ -790,40 +793,18 @@ static void plugin_deactivate(const clap_plugin_t *p)
      * scheduler timeslice, allowing the audio thread to run. */
 #ifdef _WIN32
     MemoryBarrier();
-    {
-        int pd_ticks = 0;
-        nr_log("plugin_deactivate: entry  process_depth=%ld",
-               (long)InterlockedCompareExchange(&self->process_depth, 0, 0));
-        while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0) {
-            Sleep(1);
-            if (++pd_ticks % 200 == 0)
-                nr_log("plugin_deactivate: still waiting  depth=%ld  ticks=%d",
-                       (long)InterlockedCompareExchange(&self->process_depth, 0, 0),
-                       pd_ticks);
-        }
-        nr_log("plugin_deactivate: done  ticks=%d", pd_ticks);
-    }
+    while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
+        Sleep(1);
 #else
     atomic_thread_fence(memory_order_seq_cst);
-    {
-        int pd_ticks = 0;
-        nr_log("plugin_deactivate: entry  process_depth=%d",
-               (int)atomic_load(&self->process_depth));
-        while (atomic_load(&self->process_depth) != 0) {
-            sched_yield();
-            if (++pd_ticks % 200 == 0)
-                nr_log("plugin_deactivate: still waiting  depth=%d  ticks=%d",
-                       (int)atomic_load(&self->process_depth), pd_ticks);
-        }
-        nr_log("plugin_deactivate: done  ticks=%d", pd_ticks);
-    }
+    while (atomic_load(&self->process_depth) != 0)
+        sched_yield();
 #endif
 }
 
 static bool plugin_start_processing(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
-    nr_log("plugin_start_processing");
     /* Re-enable DSP after a stop/start cycle.  Activate() set this to true
      * initially; stop_processing() cleared it; we restore it here so that
      * process() does real work again rather than passing audio through. */
@@ -834,7 +815,6 @@ static bool plugin_start_processing(const clap_plugin_t *p)
 static void plugin_stop_processing(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
-    nr_log("plugin_stop_processing");
     /* Called on the audio thread after the last process() call in this
      * processing session.  Clearing active means any process() call that
      * a non-compliant host fires between here and deactivate() will
@@ -1406,6 +1386,7 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *stream)
     s.emnr_ae_run       = self->emnr_ae_run;
     s.nr3_model         = self->nr3_model;
     s.nr3_strength      = self->nr3_strength;
+    s.tooltips_on       = self->tooltips_on ? 1u : 0u;
     return stream->write(stream, &s, sizeof(s)) == (int64_t)sizeof(s);
 }
 
@@ -1418,13 +1399,15 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     /* Minimum bytes for each version:
      *   v1 = 52 bytes  (no nr3_model)
      *   v2 = 56 bytes  (adds nr3_model)
-     *   v3 = 60 bytes  (adds nr3_strength) */
+     *   v3 = 60 bytes  (adds nr3_strength)
+     *   v4 = 64 bytes  (adds tooltips_on) */
     if (got < (int64_t)sizeof(uint32_t)) return false;
     uint32_t min_bytes;
     switch (s.version) {
     case 1U: min_bytes = 52; break;
     case 2U: min_bytes = 56; break;
     case 3U: min_bytes = 60; break;
+    case 4U: min_bytes = 64; break;
     default: return false;
     }
     if (got < (int64_t)min_bytes) return false;
@@ -1449,6 +1432,9 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
         ? ((s.nr3_strength >= 0.0f && s.nr3_strength <= 1.0f) ? s.nr3_strength : 1.0f)
         : 1.0f;
 
+    /* tooltips_on: from v4 onwards; default on for older states */
+    self->tooltips_on = (s.version >= 4U) ? (s.tooltips_on != 0u) : true;
+
     apply_nr_mode(self, (s.nr_mode >= 0 && s.nr_mode <= 4) ? s.nr_mode : 0);
     apply_anr_params(self);
     apply_emnr_params(self);
@@ -1465,6 +1451,7 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
         gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
         gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
         gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
+        gui_set_tooltips(self->gui, self->tooltips_on);
     }
     return true;
 }
@@ -1527,7 +1514,6 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
 {
     clap_nr_t *self = (clap_nr_t *)p;
     (void)api;
-    nr_log("gui_create: entry  floating=%d", (int)is_floating);
     if (self->gui) return true;
     self->gui_floating = is_floating;
     char gui_title[256];
@@ -1537,8 +1523,8 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
         snprintf(gui_title, sizeof(gui_title), "%s  |  " PLUGIN_NAME, host_name);
     else
         snprintf(gui_title, sizeof(gui_title), "%s", PLUGIN_NAME);
-    self->gui = gui_create(self, on_gui_param_change, gui_title);
-    if (!self->gui) { nr_log("gui_create: gui_create() failed"); return false; }
+    self->gui = gui_create(self, on_gui_param_change, on_gui_tooltips_change, gui_title);
+    if (!self->gui) return false;
 
     /* Sync the plugin's current parameter state to the freshly-created GUI.
      * This is necessary because state_load skips gui_set_param when the GUI
@@ -1554,16 +1540,14 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
     gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
     gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
     gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
-    nr_log("gui_create: done");
+    gui_set_tooltips(self->gui, self->tooltips_on);
     return true;
 }
 
 static void gui_plugin_destroy(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
-    nr_log("gui_plugin_destroy: entry  gui=%s", self->gui ? "yes" : "null");
     if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
-    nr_log("gui_plugin_destroy: done");
 }
 
 static bool gui_set_scale(const clap_plugin_t *p, double scale) { (void)p; (void)scale; return false; }
@@ -1608,10 +1592,7 @@ static bool gui_plugin_set_parent(const clap_plugin_t *p, const clap_window_t *w
 {
     clap_nr_t *self = (clap_nr_t *)p;
     if (!self->gui) return false;
-    nr_log("gui_set_parent: entry");
-    bool ok = gui_set_parent(self->gui, window);
-    nr_log("gui_set_parent: result=%d", (int)ok);
-    return ok;
+    return gui_set_parent(self->gui, window);
 }
 
 static bool gui_plugin_set_transient(const clap_plugin_t *p, const clap_window_t *w)
@@ -1632,7 +1613,6 @@ static bool gui_plugin_show(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
     if (!self->gui) return false;
-    nr_log("gui_show: entry");
     /* Sync current values into the GUI before making it visible */
     gui_set_param(self->gui, PARAM_NR_MODE,          (double)self->nr_mode);
     gui_set_param(self->gui, PARAM_ANR_TAPS,         (double)self->anr_taps);
@@ -1642,19 +1622,14 @@ static bool gui_plugin_show(const clap_plugin_t *p)
     gui_set_param(self->gui, PARAM_EMNR_GAIN_METHOD, (double)self->emnr_gain_method);
     gui_set_param(self->gui, PARAM_EMNR_NPE_METHOD,  (double)self->emnr_npe_method);
     gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
-    bool ok = gui_show(self->gui);
-    nr_log("gui_show: result=%d", (int)ok);
-    return ok;
+    return gui_show(self->gui);
 }
 
 static bool gui_plugin_hide(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
     if (!self->gui) return false;
-    nr_log("gui_hide: entry");
-    bool ok = gui_hide(self->gui);
-    nr_log("gui_hide: result=%d", (int)ok);
-    return ok;
+    return gui_hide(self->gui);
 }
 
 static const clap_plugin_gui_t s_gui = {
@@ -1797,6 +1772,7 @@ static const clap_plugin_t *factory_create_plugin(const clap_plugin_factory_t *f
     self->emnr_npe_method   = 0;   /* OSMS   */
     self->emnr_ae_run       = 1;
     self->nr3_strength      = 0.5f;
+    self->tooltips_on       = true;
 
     return pl;
 }

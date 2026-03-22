@@ -21,8 +21,8 @@ CLAP plugin format.
 that form the core of this plugin were written by others - specifically
 Warren Pratt (NR0V) and Richard Samphire (MW0LGE) - and are reproduced here
 under the terms of the GNU General Public License. Our contribution is the
-CLAP plugin wrapper, the audio integration layer, and the Win32 user
-interface. We make no claim of authorship over the DSP algorithms themselves,
+CLAP plugin wrapper, the audio integration layer, and the cross-platform
+Dear ImGui user interface. We make no claim of authorship over the DSP algorithms themselves,
 and this repository would not exist without the work of those individuals.
 Full attribution is given in the [Special Thanks](#special-thanks) section
 and in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
@@ -77,21 +77,27 @@ please direct any support to those projects directly. See the
 
 ## Platform support
 
-Currently **Windows x64 only** (MSVC or MinGW-w64).
+| Platform | Architecture | Status |
+|----------|-------------|--------|
+| Windows | x64 | Supported |
+| macOS | Apple Silicon (arm64) | Supported |
+| Linux | x64 | Supported |
 
-macOS and Linux are not currently supported. Pull requests that add support
-for either platform are welcome, provided they do not break the existing
-Windows build or introduce regressions. Please keep platform-specific code
-well-isolated.
+---
+
+## Getting, building, and installing
+
+Choose the section for your platform below. Each section walks you through
+everything from scratch. You do not need any prior programming experience.
+
+- [Windows](#windows)
+- [macOS](#macos)
+- [Linux](#linux)
 
 ---
 
-## Getting, building, and installing on Windows
-
-This section walks you through everything from scratch. You do not need any
-prior programming experience. Just follow each step in order.
-
----
+<a name="windows"></a>
+## Windows
 
 ### Part 1 - Install the required tools (one time only)
 
@@ -157,7 +163,7 @@ The Community edition is free.
 1. In the same Command Prompt window (still inside the `clap-nr` folder),
    type the following and press Enter:
    ```
-   build.bat
+   build-win.bat
    ```
 2. You will see a lot of text scroll past. This is normal. Wait for it to
    finish. It should end with something like `Build succeeded`.
@@ -180,7 +186,7 @@ standard Windows CLAP plugin folder so your host application can find it.
 **You must run this as Administrator.**
 
 1. Open **File Explorer** and navigate to the `clap-nr` folder.
-2. Right-click on **install.bat** and choose **Run as administrator**.
+2. Right-click on **install-win.bat** and choose **Run as administrator**.
 3. If Windows asks "Do you want to allow this app to make changes to your
    device?", click **Yes**.
 4. A Command Prompt window will open and run the install. When it finishes
@@ -201,7 +207,7 @@ You may need to trigger a plugin rescan inside the host.
 
 If you want to remove the plugin from your system:
 
-**You must run this as Administrator.**
+**You must run as Administrator.**
 
 1. Open **File Explorer** and navigate to the `clap-nr` folder.
 2. Right-click on **uninstall.bat** and choose **Run as administrator**.
@@ -220,6 +226,135 @@ application first, then run the script again.
 
 ---
 
+<a name="macos"></a>
+## macOS
+
+The macOS build requires Apple Silicon (arm64). An Intel build is not
+currently provided.
+
+---
+
+### Prerequisites
+
+- Xcode Command Line Tools (includes `clang` and `make`)
+- CMake 3.20 or later
+- Homebrew (recommended for installing CMake)
+
+**Install Xcode Command Line Tools:**
+```
+xcode-select --install
+```
+
+**Install CMake via Homebrew:**
+```
+brew install cmake
+```
+
+---
+
+### Part 1 - Get the source code
+
+1. Open **Terminal** (Finder > Applications > Utilities > Terminal).
+2. Navigate to where you want to put the project:
+   ```
+   cd ~/Desktop
+   ```
+3. Clone the repository:
+   ```
+   git clone https://github.com/DorsetDevStudio/clap-nr.git
+   cd clap-nr
+   ```
+
+---
+
+### Part 2 - Build the plugin
+
+```
+bash build-mac.sh
+```
+
+The compiled plugin will be at `build-mac/clap-nr.clap`.
+
+---
+
+### Part 3 - Install the plugin
+
+```
+bash install-mac.sh
+```
+
+This copies the plugin to `~/Library/Audio/Plug-Ins/CLAP/` (user install,
+no administrator password required).
+
+The plugin is now installed. Open your CLAP-compatible host application
+and it should appear in the plugin list. You may need to trigger a plugin
+rescan inside the host.
+
+---
+
+<a name="linux"></a>
+## Linux
+
+The Linux build produces an x86_64 plugin.
+
+---
+
+### Prerequisites
+
+You will need the following packages. On Debian/Ubuntu:
+```
+sudo apt install build-essential cmake git
+```
+On Fedora/RHEL:
+```
+sudo dnf install gcc gcc-c++ cmake git
+```
+
+---
+
+### Part 1 - Get the source code
+
+1. Open a terminal.
+2. Navigate to where you want to put the project:
+   ```
+   cd ~/Desktop
+   ```
+3. Clone the repository:
+   ```
+   git clone https://github.com/DorsetDevStudio/clap-nr.git
+   cd clap-nr
+   ```
+
+---
+
+### Part 2 - Build the plugin
+
+```
+bash build-linux.sh
+```
+
+The compiled plugin will be at `build-linux/clap-nr.clap`.
+
+---
+
+### Part 3 - Install the plugin
+
+**User install** (no root required - installs to `~/.clap/`):
+```
+bash install-linux.sh
+```
+
+**System-wide install** (requires sudo - installs to `/usr/lib/clap/`):
+```
+bash install-linux.sh --system
+```
+
+The plugin is now installed. Open your CLAP-compatible host application
+and it should appear in the plugin list. You may need to trigger a plugin
+rescan inside the host.
+
+---
+
 ## Project layout
 
 ```
@@ -228,6 +363,13 @@ clap-nr/
 ├-- LICENSE                  <- GNU GPL v2
 ├-- THIRD-PARTY-NOTICES.md   <- upstream copyright notices
 ├-- README.md
+├-- build-win.bat            <- Windows: configure and build
+├-- install-win.bat          <- Windows: install to %CommonProgramFiles%\CLAP  (run as Admin)
+├-- uninstall.bat            <- Windows: uninstall  (run as Admin)
+├-- build-mac.sh             <- macOS (arm64): configure and build
+├-- install-mac.sh           <- macOS: install to ~/Library/Audio/Plug-Ins/CLAP/
+├-- build-linux.sh           <- Linux (x64): configure and build
+├-- install-linux.sh         <- Linux: install to ~/.clap/  or  /usr/lib/clap/
 ├-- include/
 │   └-- clap/                <- CLAP SDK headers (vendored, MIT licence)
 ├-- libs/
@@ -236,7 +378,7 @@ clap-nr/
 │   └-- specbleach/          <- specbleach_*.h + .dll/.lib
 └-- src/
     ├-- clap_nr.c            <- CLAP plugin entry point and audio processing
-    ├-- gui_win32.c          <- Win32 parameter UI
+    ├-- gui_imgui.cpp        <- Cross-platform Dear ImGui UI
     ├-- gui.h
     └-- nr/                  <- DSP noise-reduction algorithm sources
         ├-- anr.c/h          (NR1 - Adaptive LMS)

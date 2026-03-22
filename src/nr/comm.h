@@ -64,11 +64,21 @@ warren@wpratt.com
 
 /* -----------------------------------------------------------------------
  * Portable aligned-memory free
- * _aligned_free() is MSVC CRT only; on POSIX the allocator (posix_memalign
- * or aligned_alloc) returns memory that must be released with plain free().
+ * All NR module allocations use malloc0 (= calloc), which returns ordinary
+ * heap memory.  The original Wdx SDR code called _aligned_free() in the
+ * destroy functions, but _aligned_free() must only be paired with
+ * _aligned_malloc() -- calling it on calloc memory crashes on Windows.
+ * We redirect both the nr_aligned_free macro AND any direct _aligned_free()
+ * calls (e.g. in emnr.c's decalc_emnr) to plain free(), which is the
+ * correct deallocator for calloc'ed memory on all platforms.
  * --------------------------------------------------------------------- */
 #ifdef _WIN32
-#  define nr_aligned_free(p)        _aligned_free(p)
+#  define nr_aligned_free(p)        free(p)
+   /* Redirect direct _aligned_free() calls (e.g. in decalc_emnr) to free */
+#  ifdef _aligned_free
+#    undef _aligned_free
+#  endif
+#  define _aligned_free(p)          free(p)
 #else
 #  define nr_aligned_free(p)        free(p)
 #endif

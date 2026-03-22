@@ -193,6 +193,11 @@ struct clap_nr_gui_s {
     int    nr3_model;
     float  nr3_strength;
 
+    /* Per-instance ImGui context.  Each plugin instance creates its own
+     * ImGuiContext so that multiple instances can coexist in the same process
+     * without sharing / overwriting the global GImGui pointer. */
+    ImGuiContext *imgui_ctx;
+
     /* Prevent feedback when we write to a widget from gui_set_param */
     bool   updating;
     bool   tooltips_on;   /* show on-hover tooltips */
@@ -282,8 +287,15 @@ static void d3d_destroy(clap_nr_gui_s *g)
  * ImGui helper widgets
  * --------------------------------------------------------------------- */
 
-/* per-frame tooltip visibility flag (set at top of render_frame) */
-static bool s_show_tooltips = true;
+/* per-frame tooltip visibility flag (set at top of render_frame).
+ * Declared here so show_tooltip_text can read it; written at the start of
+ * each render_frame() call from the per-instance g->tooltips_on field.
+ * On Windows this is safe: render_frame runs on the single main thread and
+ * SetCurrentContext is called first.  On Linux/macOS each instance has its
+ * own render thread, which also owns the ImGui context for that instance, so
+ * there is no cross-instance data race.  The variable is thread_local so
+ * each render thread has its own copy. */
+static thread_local bool s_show_tooltips = true;
 
 /* Show a wrapped tooltip for the last-drawn widget if tooltips are enabled. */
 static void show_tooltip_text(const char *text)
@@ -352,6 +364,7 @@ static void begin_param_table(const char *id)
  * --------------------------------------------------------------------- */
 static void render_frame(clap_nr_gui_s *g)
 {
+    ImGui::SetCurrentContext(g->imgui_ctx);
     s_show_tooltips = g->tooltips_on;
 #ifdef _WIN32
     ImGui_ImplDX11_NewFrame();
@@ -756,9 +769,11 @@ static void gui_win32_cleanup(clap_nr_gui_s *g)
     }
     /* d3d_device is non-null iff D3D11 + ImGui were fully initialised */
     if (g->d3d_device) {
+        ImGui::SetCurrentContext(g->imgui_ctx);
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
+        ImGui::DestroyContext(g->imgui_ctx);
+        g->imgui_ctx = nullptr;
         d3d_destroy(g);   /* releases all COM refs and sets pointers to nullptr */
     }
 }
@@ -772,6 +787,16 @@ static void gui_win32_cleanup(clap_nr_gui_s *g)
 
 static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    clap_nr_gui_s *g = (clap_nr_gui_s *)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+
+    /* Activate this instance's ImGui context before anything touches GImGui.
+     * This is required for multi-instance safety: each plugin instance owns
+     * a separate ImGuiContext.  We guard on imgui_ctx != nullptr so that
+     * messages that arrive before WM_CREATE (none, in practice) or after
+     * ImGui::DestroyContext() skip the call safely. */
+    if (g && g->imgui_ctx)
+        ImGui::SetCurrentContext(g->imgui_ctx);
+
     /* Guard: ImGui_ImplWin32_WndProcHandler dereferences the ImGui context
      * (calls ImGui::GetIO() which reads GImGui).  If gui_win32_cleanup() has
      * already called ImGui::DestroyContext(), GImGui is null and calling
@@ -784,8 +809,6 @@ static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     if (ImGui::GetCurrentContext() &&
         ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
         return 1;
-
-    clap_nr_gui_s *g = (clap_nr_gui_s *)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
 
     switch (msg) {
     case WM_CREATE: {
@@ -912,7 +935,8 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
     }
 
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    g->imgui_ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(g->imgui_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -969,7 +993,8 @@ static void *glfw_render_thread(void *arg)
     glfwSwapInterval(1);  /* vsync */
 
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    g->imgui_ctx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(g->imgui_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -992,9 +1017,11 @@ static void *glfw_render_thread(void *arg)
         }
     }
 
+    ImGui::SetCurrentContext(g->imgui_ctx);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    ImGui::DestroyContext(g->imgui_ctx);
+    g->imgui_ctx = nullptr;
     glfwDestroyWindow(g->glfw_win);
     g->glfw_win = nullptr;
     glfwTerminate();

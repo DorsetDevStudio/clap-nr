@@ -1,10 +1,25 @@
 /*
- * gui.h  –  Platform-agnostic GUI interface for clap-nr
+ * gui.h  -  Platform-agnostic GUI interface for clap-nr
  *
- * Platform implementation files:
- *   Windows  : gui_win32.c
- *   Linux    : gui_gtk.c    (future)
- *   macOS    : gui_cocoa.m  (future)
+ * Implementation: gui_imgui.cpp (Dear ImGui + DirectX 11 / Win32)
+ * Dear ImGui provides a single cross-platform implementation; no
+ * separate per-OS files are required.
+ *
+ * Copyright (C) 2026 - Stuart E. Green (G5STU)
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
 #ifndef CLAP_NR_GUI_H

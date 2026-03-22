@@ -1,7 +1,7 @@
 ﻿/*
  * clap_nr.c  -  CLAP plugin incorporating DSP noise-reduction algorithms
  *
- * Copyright (C) 2025  Station Master
+ * Copyright (C) 2026 - Stuart E. Green (G5STU)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

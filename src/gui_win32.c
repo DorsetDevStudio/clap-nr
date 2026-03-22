@@ -98,6 +98,11 @@ enum {
 #define NR2_GRP_H   110          /* 22 header + 3xROW_H(28) + 4 pad       */
 #define H_NR2       (NR2_GRP_Y + NR2_GRP_H + 8)    /* 180 */
 
+/* NR4 group box */
+#define NR4_GRP_Y   CONT_Y
+#define NR4_GRP_H   58           /* 22 header + 1xROW_H(28) + 8 pad       */
+#define H_NR4       (NR4_GRP_Y + NR4_GRP_H + 8)    /* 108 */
+
 /* Off / NR3 / NR4 -- single message line */
 #define H_SIMPLE    (CONT_Y + 42 + 8)               /* 112 */
 
@@ -105,6 +110,7 @@ static int mode_client_h(int mode)
 {
     if (mode == 1) return H_NR1;
     if (mode == 2) return H_NR2;
+    if (mode == 4) return H_NR4;
     return H_SIMPLE;
 }
 
@@ -130,6 +136,9 @@ static int mode_client_h(int mode)
 #define IDC_CHECK_AE         123
 #define IDC_BTN_ABOUT        130
 
+#define IDC_GRP_NR4          140
+#define IDC_SLD_NR4_REDUCTION 141
+
 #define WC_CLAPNR           "ClapNrGui_v3"
 
 /* ---- Slider <-> parameter value converters --------------------------- */
@@ -139,6 +148,8 @@ static int    gain_to_slider(double g) { int p=(int)(g*1e6+.5); return p<1?1:(p>
 static double slider_to_gain(int   p)  { return p * 1e-6; }
 static int    leak_to_slider(double v) { int p=(int)(v*1e3+.5); return p<0?0:(p>1000?1000:p); }
 static double slider_to_leak(int   p)  { return p / 1000.0; }
+static int    reduc_to_slider(float v) { int p=(int)(v*10.0f+.5f); return p<0?0:(p>200?200:p); }
+static float  slider_to_reduc(int   p) { return p / 10.0f; }
 
 /* ---- GUI struct ------------------------------------------------------- */
 struct clap_nr_gui_s {
@@ -168,6 +179,10 @@ struct clap_nr_gui_s {
     HWND lbl_npe,     combo_npe;
     HWND check_ae;
 
+    /* NR4 (SBNR) controls */
+    HWND grp_nr4;
+    HWND lbl_nr4_reduction, sld_nr4_reduction;
+
     /* About button */
     HWND  btn_about;
 
@@ -183,6 +198,7 @@ struct clap_nr_gui_s {
     int    emnr_gain_method;
     int    emnr_npe_method;
     int    emnr_ae_run;
+    float  nr4_reduction;
 };
 
 /* ---- Tooltip helper -------------------------------------------------- */
@@ -274,10 +290,7 @@ static void update_mode_message(clap_nr_gui_t *g)
         SetWindowTextA(g->lbl_msg,
             "NR3 (RNNR) active — no adjustable parameters.");
         break;
-    case 4:
-        SetWindowTextA(g->lbl_msg,
-            "NR4 (SBNR) active — no adjustable parameters.");
-        break;
+
     default:
         SetWindowTextA(g->lbl_msg, "");
         break;
@@ -287,8 +300,8 @@ static void update_mode_message(clap_nr_gui_t *g)
 /* ---- Show/hide content sections for the active mode ------------------ */
 static void show_section_for_mode(clap_nr_gui_t *g, int mode)
 {
-    /* Off / NR3 / NR4: single status message */
-    int simple = (mode == 0 || mode == 3 || mode == 4);
+    /* Off / NR3: single status message */
+    int simple = (mode == 0 || mode == 3);
     ShowWindow(g->lbl_msg, simple ? SW_SHOW : SW_HIDE);
 
     /* NR1 section */
@@ -317,6 +330,16 @@ static void show_section_for_mode(clap_nr_gui_t *g, int mode)
     for (int i = 0; nr2_all[i]; ++i)
         ShowWindow(nr2_all[i], nr2 ? SW_SHOW : SW_HIDE);
 
+    /* NR4 section */
+    int nr4 = (mode == 4);
+    HWND nr4_all[] = {
+        g->grp_nr4,
+        g->lbl_nr4_reduction, g->sld_nr4_reduction,
+        NULL
+    };
+    for (int i = 0; nr4_all[i]; ++i)
+        ShowWindow(nr4_all[i], nr4 ? SW_SHOW : SW_HIDE);
+
     update_mode_message(g);
     resize_to_mode(g, mode);
 }
@@ -336,6 +359,13 @@ static void sync_nr2_combos(clap_nr_gui_t *g)
     SendMessageA(g->combo_npe,     CB_SETCURSEL, (WPARAM)g->emnr_npe_method,  0);
     SendMessageA(g->check_ae, BM_SETCHECK,
                  g->emnr_ae_run ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static void sync_nr4_slider(clap_nr_gui_t *g)
+{
+    if (g->sld_nr4_reduction)
+        SendMessageA(g->sld_nr4_reduction, TBM_SETPOS, TRUE,
+                     reduc_to_slider(g->nr4_reduction));
 }
 
 /* ---- Window procedure ------------------------------------------------- */
@@ -391,6 +421,12 @@ static LRESULT CALLBACK gui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (v != g->anr_leakage) {
                 g->anr_leakage = v;
                 changed = TRUE; changed_id = _GUI_PARAM_ANR_LEAKAGE; changed_val = v;
+            }
+        } else if (sld == g->sld_nr4_reduction) {
+            float v = slider_to_reduc(pos);
+            if (v != g->nr4_reduction) {
+                g->nr4_reduction = v;
+                changed = TRUE; changed_id = _GUI_PARAM_NR4_REDUCTION; changed_val = (double)v;
             }
         }
 
@@ -521,9 +557,8 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
                                    hwnd, (HMENU)(intptr_t)IDC_BTN_ABOUT,
                                    NULL, NULL);
 
-    /* NR3 and NR4 are not yet implemented */
+    /* NR3 not yet implemented */
     EnableWindow(g->radio_nr3, FALSE);
-    EnableWindow(g->radio_nr4, FALSE);
 
     mk_separator(hwnd, M, SEP_Y, GRP_W);
 
@@ -576,6 +611,17 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
     g->check_ae = mk_check(hwnd, "Audio Enhance (AE)", IDC_CHECK_AE,
                            ROW_LBL_X, ry, 180, 22);
 
+    /* --- NR4 group: Spectral denoiser (SBNR) -------------------------- */
+    g->grp_nr4 = mk_groupbox(hwnd, "NR4 - Adaptive Spectral Denoiser (SBNR) Parameters",
+                             IDC_GRP_NR4, M, NR4_GRP_Y, GRP_W, NR4_GRP_H);
+
+    ry = NR4_GRP_Y + 22;
+    g->lbl_nr4_reduction = mk_static(hwnd, "Reduction:", 0,
+                                     ROW_LBL_X, ry+3, ROW_LBL_W, LBL_H);
+    g->sld_nr4_reduction = mk_trackbar(hwnd, IDC_SLD_NR4_REDUCTION,
+                                       ROW_SLD_X, ry, ROW_SLD_W, SLD_H,
+                                       0, 200, reduc_to_slider(g->nr4_reduction));
+
     /* --- Tooltips ----------------------------------------------------- */
     g->tt = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
                             WS_POPUP | TTS_ALWAYSTIP,
@@ -620,6 +666,10 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
             "NR2 Audio Enhance: applies a secondary gain mask after noise suppression "
             "to sharpen transients and improve intelligibility. "
             "Recommended: On.");
+        tt_add(g->tt, g->sld_nr4_reduction, hwnd,
+            "NR4 Reduction (0-20 dB): Amount of noise attenuation applied by the "
+            "adaptive spectral denoiser. Higher values suppress more noise but "
+            "may affect speech clarity. Default: 10 dB.");
         tt_add(g->tt, g->btn_about, hwnd,
             "Show version and build information.");
     }
@@ -627,6 +677,7 @@ static void create_controls(clap_nr_gui_t *g, HWND hwnd)
     /* --- Populate values and apply initial mode visibility ------------ */
     sync_nr1_edits(g);
     sync_nr2_combos(g);
+    sync_nr4_slider(g);
     CheckRadioButton(hwnd, IDC_RADIO_OFF, IDC_RADIO_NR4,
                      IDC_RADIO_OFF + g->nr_mode);
     show_section_for_mode(g, g->nr_mode);
@@ -648,6 +699,7 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change)
     g->emnr_gain_method = 2;  /* MM-LSA */
     g->emnr_npe_method  = 0;  /* OSMS   */
     g->emnr_ae_run      = 1;
+    g->nr4_reduction    = 10.0f;
     return g;
 }
 
@@ -802,6 +854,10 @@ void gui_set_param(clap_nr_gui_t *gui, clap_id param_id, double value)
     case _GUI_PARAM_EMNR_AE_RUN:
         gui->emnr_ae_run = (int)value;
         if (gui->hwnd) sync_nr2_combos(gui);
+        break;
+    case _GUI_PARAM_NR4_REDUCTION:
+        gui->nr4_reduction = (float)value;
+        if (gui->hwnd) sync_nr4_slider(gui);
         break;
     default:
         break;

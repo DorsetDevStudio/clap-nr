@@ -1,21 +1,21 @@
 /*
- * gui_imgui.cpp  -  Dear ImGui (Win32 + DirectX 11) GUI for clap-nr
+ * gui_imgui.cpp  -  Dear ImGui cross-platform GUI for clap-nr
  *
- * Implements the same gui.h interface as gui_win32.c so that clap_nr.c
- * requires no changes.  gui_win32.c is kept as a reference / fallback but
- * is no longer compiled when this file is included in the build.
- *
- * Backend decision: Win32 platform layer + DirectX 11 renderer.
- *   - Both are part of the Windows SDK; no extra DLLs shipped.
- *   - Easily swapped for OpenGL/Metal/X11 backends on other platforms.
+ * Implements the gui.h interface for all supported platforms:
+ *   Windows  : Win32 platform layer + DirectX 11 renderer
+ *   Linux    : GLFW platform layer + OpenGL 3.3 renderer (render thread)
+ *   macOS    : GLFW platform layer + OpenGL 3.3 renderer (render thread)
  *
  * Threading model:
- *   All ImGui calls happen on the main thread (the thread that owns the
- *   window).  The audio thread only writes parameters via handle_param_event;
- *   gui_set_param() (called from the main thread) pushes values into the
- *   cached state struct which the render loop reads each frame.
+ *   All ImGui calls happen on a single thread that owns the window context.
+ *   On Windows this is the host main thread (driven by WM_TIMER).
+ *   On Linux/macOS this is a dedicated render thread so the host main thread
+ *   is never blocked.
+ *   The audio thread only writes parameters via gui_set_param(); the render
+ *   thread reads those cached values each frame - no locking needed because
+ *   all writes are 32/64-bit aligned and the worst case is one stale frame.
  *
- * Copyright (C) 2026 - Stuart E. Green (G5STU)
+ * Copyright (C) 2025 - Stuart E. Green (G5STU)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -32,13 +32,36 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
+/* -----------------------------------------------------------------------
+ * Platform-specific system headers + ImGui backend headers
+ * --------------------------------------------------------------------- */
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <dwmapi.h>
+#  include <shellapi.h>
+#  include <d3d11.h>
+#  include "imgui_impl_win32.h"
+#  include "imgui_impl_dx11.h"
+   /* Forward-declare the ImGui Win32 message handler */
+   extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+#else
+   /* Linux and macOS: GLFW + OpenGL 3.3 */
+#  include <GLFW/glfw3.h>
+#  include <pthread.h>
+#  include <time.h>
+#  ifdef __APPLE__
+#    include <OpenGL/gl3.h>
+#  else
+#    include <GL/gl.h>
+#    include <X11/Xlib.h>   /* XInitThreads() */
+#  endif
+#  include "imgui_impl_glfw.h"
+#  include "imgui_impl_opengl3.h"
 #endif
-#include <windows.h>
-#include <dwmapi.h>
-#include <shellapi.h>
-#include <d3d11.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,15 +69,10 @@
 
 /* ImGui core */
 #include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_dx11.h"
 
-/* Plugin headers - included in C++ context, not inside extern "C" */
+/* Plugin headers */
 #include "gui.h"
 #include "version.h"
-
-/* Forward-declare the ImGui Win32 message handler */
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 /* -----------------------------------------------------------------------
  * Param indices  (must stay in sync with clap_nr.c)
@@ -142,17 +160,24 @@ struct clap_nr_gui_s {
     void           *plugin;
     gui_param_cb_t  on_param_change;
 
-    /* Window / D3D11 */
-    HWND                  hwnd;
-    bool                  embedded;
-    ID3D11Device         *d3d_device;
-    ID3D11DeviceContext  *d3d_ctx;
-    IDXGISwapChain       *swap_chain;
+#ifdef _WIN32
+    /* Window / D3D11 (Windows) */
+    HWND                    hwnd;
+    bool                    embedded;
+    ID3D11Device           *d3d_device;
+    ID3D11DeviceContext    *d3d_ctx;
+    IDXGISwapChain         *swap_chain;
     ID3D11RenderTargetView *rtv;
-    UINT                  sc_w, sc_h;  /* swapchain dimensions */
-
-    /* Render timer */
-    UINT_PTR              timer_id;
+    UINT                    sc_w, sc_h;  /* swapchain dimensions */
+    UINT_PTR                timer_id;
+#else
+    /* Window / OpenGL (Linux + macOS via GLFW) */
+    GLFWwindow     *glfw_win;
+    pthread_t       render_thread;
+    volatile bool   running;       /* render thread exit signal */
+    volatile bool   visible;       /* whether the window should be shown */
+    volatile bool   thread_ready;  /* render thread has created the window */
+#endif
 
     /* Cached parameter values (written by gui_set_param on main thread,
      * read by the render loop on the same thread -- no locking needed). */
@@ -188,8 +213,9 @@ struct clap_nr_gui_s {
 #define GUI_BASE_H  230   /* height adapts per-mode at runtime */
 
 /* -----------------------------------------------------------------------
- * D3D11 helpers
+ * D3D11 helpers  (Windows only)
  * --------------------------------------------------------------------- */
+#ifdef _WIN32
 static bool d3d_create(clap_nr_gui_s *g, HWND hwnd)
 {
     DXGI_SWAP_CHAIN_DESC sd = {};
@@ -242,6 +268,7 @@ static void d3d_destroy(clap_nr_gui_s *g)
     if (g->d3d_ctx)    { g->d3d_ctx->Release();     g->d3d_ctx    = nullptr; }
     if (g->d3d_device) { g->d3d_device->Release();  g->d3d_device = nullptr; }
 }
+#endif /* _WIN32 */
 
 /* -----------------------------------------------------------------------
  * ImGui helper widgets
@@ -318,8 +345,13 @@ static void begin_param_table(const char *id)
 static void render_frame(clap_nr_gui_s *g)
 {
     s_show_tooltips = g->tooltips_on;
+#ifdef _WIN32
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
+#else
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+#endif
     ImGui::NewFrame();
 
     /* Full-window child so we fill the swapchain surface */
@@ -644,6 +676,7 @@ static void render_frame(clap_nr_gui_s *g)
 
     /* Render */
     ImGui::Render();
+#ifdef _WIN32
     float clear[4] = { COL_BG.x, COL_BG.y, COL_BG.z, 1.0f };
     g->d3d_ctx->OMSetRenderTargets(1, &g->rtv, nullptr);
     g->d3d_ctx->ClearRenderTargetView(g->rtv, clear);
@@ -656,11 +689,27 @@ static void render_frame(clap_nr_gui_s *g)
         ShellExecuteA(nullptr, "open", "https://clapnr.com",
                       nullptr, nullptr, SW_SHOWNORMAL);
     }
+#else
+    glClearColor(COL_BG.x, COL_BG.y, COL_BG.z, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    glfwSwapBuffers(g->glfw_win);
+
+    if (g->open_website) {
+        g->open_website = false;
+#  ifdef __APPLE__
+        system("open https://clapnr.com");
+#  else
+        system("xdg-open https://clapnr.com");
+#  endif
+    }
+#endif
 }
 
 /* -----------------------------------------------------------------------
- * Window procedure
+ * Window procedure + class registration  (Windows only)
  * --------------------------------------------------------------------- */
+#ifdef _WIN32
 #define WC_IMGUI_NR  "ClapNrImGui_v1"
 
 static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -746,7 +795,7 @@ static void register_class_imgui()
 }
 
 /* -----------------------------------------------------------------------
- * Create the actual OS window + ImGui context for a given gui instance
+ * Create the Win32 window + ImGui context
  * --------------------------------------------------------------------- */
 static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
                                      int x, int y, int w, int h,
@@ -762,9 +811,7 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
     if (!g->hwnd) return false;
 
     /* Request dark non-client frame (title bar + borders) on Windows 10 20H1+
-     * and Windows 11.  DWMWA_USE_IMMERSIVE_DARK_MODE == 20; older SDKs only
-     * define 19 (the unofficial pre-release attribute), so we define both and
-     * try the official value first. */
+     * and Windows 11. */
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
@@ -772,7 +819,7 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
         BOOL dark = TRUE;
         if (FAILED(DwmSetWindowAttribute(g->hwnd,
                 DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark))))
-            DwmSetWindowAttribute(g->hwnd, 19, &dark, sizeof(dark)); /* pre-20H1 */
+            DwmSetWindowAttribute(g->hwnd, 19, &dark, sizeof(dark));
     }
 
     if (!d3d_create(g, g->hwnd)) {
@@ -780,11 +827,10 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
         return false;
     }
 
-    /* One shared ImGui context per plugin instance (each instance gets its own) */
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
-    io.IniFilename = nullptr;  /* no imgui.ini on disk */
+    io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
     apply_theme();
@@ -792,11 +838,101 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
     ImGui_ImplWin32_Init(g->hwnd);
     ImGui_ImplDX11_Init(g->d3d_device, g->d3d_ctx);
 
-    /* 60 fps render timer (WM_TIMER, ~16 ms) */
     g->timer_id = SetTimer(g->hwnd, 1, 16, nullptr);
-
     return true;
 }
+
+#else /* !_WIN32 - Linux / macOS via GLFW + OpenGL3 */
+
+/* -----------------------------------------------------------------------
+ * GLFW render thread  (Linux / macOS)
+ * Each plugin instance runs its own thread that owns the GLFW/OpenGL
+ * context and drives rendering at ~60 fps.
+ * --------------------------------------------------------------------- */
+static void *glfw_render_thread(void *arg)
+{
+    clap_nr_gui_s *g = (clap_nr_gui_s *)arg;
+
+#ifdef __linux__
+    /* Allow Xlib calls from this non-main thread. */
+    XInitThreads();
+#endif
+
+    if (!glfwInit()) {
+        g->thread_ready = true;
+        return nullptr;
+    }
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#ifdef __APPLE__
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#endif
+    glfwWindowHint(GLFW_VISIBLE,   GLFW_FALSE);  /* shown later via gui_show */
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
+
+    g->glfw_win = glfwCreateWindow(GUI_BASE_W, GUI_BASE_H,
+                                    g->window_title, nullptr, nullptr);
+    if (!g->glfw_win) {
+        glfwTerminate();
+        g->thread_ready = true;
+        return nullptr;
+    }
+
+    glfwSetWindowUserPointer(g->glfw_win, g);
+    glfwSetWindowSizeLimits(g->glfw_win,
+                             GUI_BASE_W, GUI_BASE_H,
+                             GLFW_DONT_CARE, GLFW_DONT_CARE);
+
+    glfwMakeContextCurrent(g->glfw_win);
+    glfwSwapInterval(1);  /* vsync */
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO &io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    apply_theme();
+
+    ImGui_ImplGlfw_InitForOpenGL(g->glfw_win, true);
+    ImGui_ImplOpenGL3_Init("#version 330 core");
+
+    /* Signal gui_show (or gui_create) that the window exists */
+    g->thread_ready = true;
+
+    while (g->running && !glfwWindowShouldClose(g->glfw_win)) {
+        glfwPollEvents();
+        if (g->visible)
+            render_frame(g);
+        else {
+            /* Idle: sleep to avoid burning CPU while hidden */
+            struct timespec ts = { 0, 16000000L }; /* 16 ms */
+            nanosleep(&ts, nullptr);
+        }
+    }
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+    glfwDestroyWindow(g->glfw_win);
+    g->glfw_win = nullptr;
+    glfwTerminate();
+    return nullptr;
+}
+
+/* Spin-wait with a 2-second timeout for the render thread to be ready. */
+static bool wait_for_thread_ready(clap_nr_gui_s *g)
+{
+    for (int i = 0; i < 2000 && !g->thread_ready; ++i) {
+        struct timespec ts = { 0, 1000000L }; /* 1 ms */
+        nanosleep(&ts, nullptr);
+    }
+    return g->glfw_win != nullptr;
+}
+
+#endif /* !_WIN32 */
 
 /* -----------------------------------------------------------------------
  * Public API that matches gui.h
@@ -832,6 +968,7 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
 void gui_destroy(clap_nr_gui_t *gui)
 {
     if (!gui) return;
+#ifdef _WIN32
     if (gui->hwnd) {
         if (gui->timer_id) KillTimer(gui->hwnd, gui->timer_id);
         ImGui_ImplDX11_Shutdown();
@@ -841,12 +978,19 @@ void gui_destroy(clap_nr_gui_t *gui)
         DestroyWindow(gui->hwnd);
         gui->hwnd = nullptr;
     }
+#else
+    if (gui->glfw_win) {
+        gui->running = false;
+        pthread_join(gui->render_thread, nullptr);
+    }
+#endif
     free(gui);
 }
 
 bool gui_set_parent(clap_nr_gui_t *gui, const clap_window_t *window)
 {
     if (!gui || !window) return false;
+#ifdef _WIN32
     gui->embedded = true;
     HWND parent = (HWND)window->win32;
     RECT rc; GetClientRect(parent, &rc);
@@ -857,6 +1001,12 @@ bool gui_set_parent(clap_nr_gui_t *gui, const clap_window_t *window)
     return create_window_and_imgui(gui, parent,
                                    0, 0, w, h,
                                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0);
+#else
+    /* GLFW does not support parenting into an arbitrary X11/Cocoa window.
+     * Return false so the host falls back to floating mode. */
+    (void)window;
+    return false;
+#endif
 }
 
 void gui_get_size(clap_nr_gui_t *gui, uint32_t *out_w, uint32_t *out_h)
@@ -870,14 +1020,12 @@ bool gui_show(clap_nr_gui_t *gui)
 {
     if (!gui) return false;
 
+#ifdef _WIN32
     if (!gui->hwnd) {
         /* Floating window */
         gui->embedded = false;
         POINT pt = { 200, 200 };
         GetCursorPos(&pt);
-        /* Normal overlapped window: caption + close button only (no min/max).
-         * WS_OVERLAPPED gives a proper taskbar entry and standard title bar.
-         * WS_EX_APPWINDOW makes the taskbar button appear even when hosted. */
         DWORD style   = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
         DWORD exstyle = WS_EX_APPWINDOW;
         RECT  r       = { 0, 0, GUI_BASE_W, GUI_BASE_H };
@@ -906,22 +1054,54 @@ bool gui_show(clap_nr_gui_t *gui)
         SetForegroundWindow(gui->hwnd);
     }
     return true;
+
+#else  /* Linux / macOS */
+    if (!gui->glfw_win) {
+        /* Start the render thread which creates the GLFW window */
+        gui->running      = true;
+        gui->visible      = false;
+        gui->thread_ready = false;
+        if (pthread_create(&gui->render_thread, nullptr, glfw_render_thread, gui) != 0)
+            return false;
+        if (!wait_for_thread_ready(gui))
+            return false;
+    }
+    gui->visible = true;
+    glfwShowWindow(gui->glfw_win);
+    glfwFocusWindow(gui->glfw_win);
+    return true;
+#endif
 }
 
 bool gui_hide(clap_nr_gui_t *gui)
 {
-    if (!gui || !gui->hwnd) return false;
+    if (!gui) return false;
+#ifdef _WIN32
+    if (!gui->hwnd) return false;
     ShowWindow(gui->hwnd, SW_HIDE);
+#else
+    if (!gui->glfw_win) return false;
+    gui->visible = false;
+    glfwHideWindow(gui->glfw_win);
+#endif
     return true;
 }
 
 bool gui_resize(clap_nr_gui_t *gui, uint32_t w, uint32_t h)
 {
-    if (!gui || !gui->hwnd || !gui->embedded) return false;
+    if (!gui) return false;
+#ifdef _WIN32
+    if (!gui->hwnd || !gui->embedded) return false;
     UINT nw = (w < GUI_BASE_W) ? GUI_BASE_W : w;
     UINT nh = (h < GUI_BASE_H) ? GUI_BASE_H : h;
     SetWindowPos(gui->hwnd, nullptr, 0, 0, (int)nw, (int)nh,
                  SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+#else
+    if (!gui->glfw_win) return false;
+    int nw = (int)((w < GUI_BASE_W) ? GUI_BASE_W : w);
+    int nh = (int)((h < GUI_BASE_H) ? GUI_BASE_H : h);
+    glfwSetWindowSize(gui->glfw_win, nw, nh);
+#endif
     return true;
 }
 

@@ -82,7 +82,7 @@
  * --------------------------------------------------------------------- */
 #define PLUGIN_ID      "com.dorsetdevstufio.clap-nr"
 #define PLUGIN_NAME    "CLAP NR"
-#define PLUGIN_VENDOR  "Station Master"
+#define PLUGIN_VENDOR  "Stuart E. Green"
 #define PLUGIN_VERSION CLAP_NR_VERSION_STR
 #define PLUGIN_URL     ""
 
@@ -1367,6 +1367,14 @@ static bool gui_get_preferred_api(const clap_plugin_t *p, const char **api, bool
 #ifdef _WIN32
     *api = CLAP_WINDOW_API_WIN32;
     *is_floating = false;
+    return true;
+#elif defined(__linux__)
+    *api = CLAP_WINDOW_API_X11;
+    *is_floating = true;   /* GLFW floating window, no parent embedding */
+    return true;
+#elif defined(__APPLE__)
+    *api = CLAP_WINDOW_API_COCOA;
+    *is_floating = true;
     return true;
 #else
     (void)api; (void)is_floating;

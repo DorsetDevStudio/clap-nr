@@ -28,7 +28,7 @@ Full attribution is given in the [Special Thanks](#special-thanks) section
 and in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 The plugin was written primarily to support
-[Station Master Pro](https://www.g5stu.co.uk/), an advanced amateur radio
+[Station Master Pro](https://www.stationmasterpro.com/), an advanced amateur radio
 application created by Stuart E. Green (G5STU). Station Master Pro handles
 digital audio processing for ham radio operators and has native CLAP plugin
 support, making it possible to run these noise-reduction algorithms as a
@@ -142,7 +142,7 @@ The Community edition is free.
    ```
 3. Type the following command and press Enter to download the repository:
    ```
-   git clone https://github.com/g5stu/clap-nr.git
+   git clone https://github.com/DorsetDevStudio/clap-nr.git
    ```
 4. Once it finishes, a folder called `clap-nr` will appear in your chosen
    location. Type the following to enter it:

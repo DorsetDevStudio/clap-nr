@@ -39,7 +39,17 @@
 #include <stdarg.h>
 
 /* System headers required by NR algorithm structs */
-#include <Windows.h>
+#ifdef _WIN32
+#  include <Windows.h>
+#else
+#  include <stdatomic.h>
+#  include <dlfcn.h>
+#  include <unistd.h>
+#  include <limits.h>
+#  ifndef PATH_MAX
+#    define PATH_MAX 4096
+#  endif
+#endif
 #include "fftw3.h"
 #include "rnnoise.h"
 #include <specbleach_adenoiser.h>
@@ -198,7 +208,11 @@ typedef struct {
      * plugin_destroy() will never run concurrently with process().  This is
      * the only safe way to allow destroy_emnr() (which calls
      * fftw_destroy_plan()) to run without racing the audio thread. */
-    volatile LONG process_depth;
+#ifdef _WIN32
+    volatile LONG       process_depth;
+#else
+    _Atomic int         process_depth;
+#endif
 } clap_nr_t;
 
 /* -----------------------------------------------------------------------
@@ -362,6 +376,7 @@ static void apply_nr3_model(clap_nr_t *self)
         RNNRloadModel(NULL);
         return;
     }
+#ifdef _WIN32
     char path[MAX_PATH];
     HMODULE hmod = GetModuleHandleA("clap-nr.clap");
     if (!hmod || !GetModuleFileNameA(hmod, path, MAX_PATH)) {
@@ -369,6 +384,18 @@ static void apply_nr3_model(clap_nr_t *self)
         return;
     }
     char *slash = strrchr(path, '\\');
+    if (!slash) slash = strrchr(path, '/');
+#else
+    char path[PATH_MAX];
+    Dl_info di;
+    if (!dladdr((void *)apply_nr3_model, &di) || !di.dli_fname) {
+        RNNRloadModel(NULL);
+        return;
+    }
+    strncpy(path, di.dli_fname, PATH_MAX - 1);
+    path[PATH_MAX - 1] = '\0';
+    char *slash = strrchr(path, '/');
+#endif
     if (!slash) { RNNRloadModel(NULL); return; }
     *(slash + 1) = '\0';
     const char *fname = (self->nr3_model == 1)
@@ -376,7 +403,11 @@ static void apply_nr3_model(clap_nr_t *self)
                         : "rnnoise_weights_large.bin";
     size_t dlen = strlen(path);
     size_t flen = strlen(fname);
+#ifdef _WIN32
     if (dlen + flen < MAX_PATH)
+#else
+    if (dlen + flen < PATH_MAX)
+#endif
         memcpy(path + dlen, fname, flen + 1);
     else {
         RNNRloadModel(NULL);
@@ -461,23 +492,24 @@ static void plugin_destroy(const clap_plugin_t *p)
      * which would cause FFTW to call abort() and kill the host process.
      * When deactivate() was already called this drain returns instantly. */
     self->active = false;
+#ifdef _WIN32
     MemoryBarrier();
     while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
         Sleep(0);
+#else
+    atomic_thread_fence(memory_order_seq_cst);
+    while (atomic_load(&self->process_depth) != 0)
+        sched_yield();
+#endif
 
     if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
 
-    __try {
-        for (int ch = 0; ch < 2; ++ch) {
-            if (self->anr[ch])  { destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
-            if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
-            if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
-            if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
-            free(self->buf[ch]); self->buf[ch] = NULL;
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        nr_log("destroy: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
+    for (int ch = 0; ch < 2; ++ch) {
+        if (self->anr[ch])  { destroy_anr (self->anr[ch]);  self->anr[ch]  = NULL; }
+        if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
+        if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
+        if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
+        free(self->buf[ch]); self->buf[ch] = NULL;
     }
 
     free(self);
@@ -488,12 +520,21 @@ static void plugin_destroy(const clap_plugin_t *p)
  * --------------------------------------------------------------------- */
 static void nr_log(const char *fmt, ...)
 {
+#ifdef _WIN32
     char path[MAX_PATH];
     DWORD n = GetTempPathA(MAX_PATH, path);
     if (n == 0 || n >= MAX_PATH) return;
     strncat_s(path, MAX_PATH, "clap-nr.log", _TRUNCATE);
     FILE *f = NULL;
     if (fopen_s(&f, path, "a") != 0 || !f) return;
+#else
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/clap-nr.log", tmp);
+    FILE *f = fopen(path, "a");
+    if (!f) return;
+#endif
     va_list ap;
     va_start(ap, fmt);
     vfprintf(f, fmt, ap);
@@ -700,8 +741,13 @@ static void plugin_deactivate(const clap_plugin_t *p)
      * process() call is in flight before control returns to the host.  The
      * wait is bounded by one audio buffer (typically 1-10 ms) so it does
      * not block the UI perceptibly. */
+#ifdef _WIN32
     while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
         Sleep(0);
+#else
+    while (atomic_load(&self->process_depth) != 0)
+        sched_yield();
+#endif
 }
 
 static bool plugin_start_processing(const clap_plugin_t *p) { (void)p; return true; }
@@ -712,7 +758,7 @@ static void plugin_reset(const clap_plugin_t *p)
     clap_nr_t *self = (clap_nr_t *)p;
     /* Flush algorithm internal state so a transport jump or plugin
      * re-insertion starts clean without residual filter history. */
-    __try {
+    {
         for (int ch = 0; ch < 2; ++ch) {
             if (self->anr[ch])  flush_anr(self->anr[ch]);
             if (self->emnr[ch]) {
@@ -738,9 +784,6 @@ static void plugin_reset(const clap_plugin_t *p)
             memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        nr_log("reset: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
-    }
 }
 
 static clap_process_status plugin_process(const clap_plugin_t *p, const clap_process_t *proc)
@@ -748,7 +791,11 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     clap_nr_t *self = (clap_nr_t *)p;
 
     /* Register this call so deactivate() can wait for us to finish. */
+#ifdef _WIN32
     InterlockedIncrement(&self->process_depth);
+#else
+    atomic_fetch_add(&self->process_depth, 1);
+#endif
 
     /* Guard: passthrough if deactivate() has already been called or activate()
      * has never been called.  Handles hosts that call process() outside the
@@ -765,7 +812,11 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 if (src && dst && src != dst) memcpy(dst, src, nc * sizeof(float));
             }
         }
+#ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
+#else
+        atomic_fetch_sub(&self->process_depth, 1);
+#endif
         return CLAP_PROCESS_CONTINUE;
     }
 
@@ -800,7 +851,11 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     }
 
     if (n == 0 || proc->audio_inputs_count == 0 || proc->audio_outputs_count == 0) {
+#ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
+#else
+        atomic_fetch_sub(&self->process_depth, 1);
+#endif
         return CLAP_PROCESS_CONTINUE;
     }
 
@@ -818,7 +873,11 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             if (src && dst && src != dst)
                 memcpy(dst, src, n * sizeof(float));
         }
+#ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
+#else
+        atomic_fetch_sub(&self->process_depth, 1);
+#endif
         return CLAP_PROCESS_CONTINUE;
     }
 
@@ -835,7 +894,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             continue;
         }
 
-        __try {
+        {
             /* Load real samples into even slots.  Zero imaginary (odd) slots
              * explicitly on every call — previous NR output may have written
              * non-zero values there, which would corrupt the next frame. */
@@ -930,9 +989,9 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                     if (*in_count == 480) {
                         /* Full 480-sample frame: call RNNoise directly.
                          * Lock cs so RNNRloadModel can safely swap st. */
-                        EnterCriticalSection(&self->rnnr[ch]->cs);
+                        NR_MUTEX_LOCK(self->rnnr[ch]->cs);
                         rnnoise_process_frame(self->rnnr[ch]->st, outbuf, inbuf);
-                        LeaveCriticalSection(&self->rnnr[ch]->cs);
+                        NR_MUTEX_UNLOCK(self->rnnr[ch]->cs);
                         if (self->nr3_strength < 1.0f) {
                             float s = self->nr3_strength;
                             float t = 1.0f - s;
@@ -968,18 +1027,13 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             for (uint32_t i = 0; i < n; ++i)
                 dst[i] = (float)self->buf[ch][2 * i];
         }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            static BOOL logged = FALSE;
-            if (!logged) {
-                nr_log("process: SEH exception 0x%08lX ch=%u -- bypassing",
-                       (unsigned long)GetExceptionCode(), ch);
-                logged = TRUE;
-            }
-            if (src != dst) memcpy(dst, src, n * sizeof(float));
-        }
     }
 
+#ifdef _WIN32
     InterlockedDecrement(&self->process_depth);
+#else
+    atomic_fetch_sub(&self->process_depth, 1);
+#endif
     return CLAP_PROCESS_CONTINUE;
 }
 
@@ -1580,18 +1634,19 @@ static bool entry_init(const char *path)
      * the delay-loaded imports resolve correctly regardless of whatever
      * DLL search path the host has configured.  This must happen before
      * any NR algorithm code runs (which uses fftw / rnnoise / specbleach). */
+#ifdef _WIN32
+    /* Pre-load companion DLLs from the plugin's own directory so that
+     * the delay-loaded imports resolve correctly regardless of whatever
+     * DLL search path the host has configured. */
     if (path && *path) {
         char dir[MAX_PATH];
         strncpy(dir, path, MAX_PATH - 1);
         dir[MAX_PATH - 1] = '\0';
-        /* Strip filename, keep trailing backslash */
         char *sep = strrchr(dir, '\\');
         if (!sep) sep = strrchr(dir, '/');
         if (sep) {
             *(sep + 1) = '\0';
             static const char *deps[] = {
-                /* libfftw3f-3 must be loaded before specbleach.dll because
-                 * specbleach imports it as a direct dependency. */
                 "libfftw3-3.dll", "libfftw3f-3.dll", "rnnoise.dll", "specbleach.dll", NULL
             };
             char dll_path[MAX_PATH];
@@ -1601,6 +1656,9 @@ static bool entry_init(const char *path)
             }
         }
     }
+#else
+    (void)path;  /* Unix: shared-library dependencies resolved by the dynamic linker */
+#endif
     return true;
 }
 static void  entry_deinit(void) {}

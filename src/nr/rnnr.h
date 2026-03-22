@@ -95,5 +95,6 @@ extern void setBuffers_rnnr (RNNR a, double* in, double* out);
 extern void destroy_rnnr (RNNR a);
 extern void xrnnr (RNNR a, int pos);
 extern void setSamplerate_rnnr(RNNR a, int rate);
+extern void RNNRloadModel(const char* file_path);
 
 #endif //_rnnr_h

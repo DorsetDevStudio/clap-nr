@@ -21,6 +21,8 @@ call :copy "%LIBS%\fftw"      libfftw3-3.dll  || goto :fail
 call :copy "%LIBS%\fftw"      libfftw3f-3.dll || goto :fail
 call :copy "%LIBS%\rnnoise"   rnnoise.dll     || goto :fail
 call :copy "%LIBS%\rnnoise"   rnnoise_avx2.dll || goto :fail
+call :copy "%LIBS%\rnnoise"   rnnoise_weights_small.bin || goto :fail
+call :copy "%LIBS%\rnnoise"   rnnoise_weights_large.bin || goto :fail
 call :copy "%LIBS%\specbleach" specbleach.dll  || goto :fail
 
 echo Plugin successfully installed to %DEST%, you can now test in your host app.

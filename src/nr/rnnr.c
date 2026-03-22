@@ -326,7 +326,9 @@ void destroy_rnnr(RNNR a)
     }
 }
 
+#ifndef CLAP_NR_STANDALONE
 PORT
+#endif
 void RNNRloadModel(const char* file_path)
 {
     // destroy any in use

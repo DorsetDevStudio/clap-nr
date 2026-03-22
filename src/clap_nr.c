@@ -21,7 +21,7 @@
  *   0 = off
  *   1 = NR1  (ANR  - Adaptive LMS)
  *   2 = NR2  (EMNR - Spectral MMSE)
- *   3 = NR3  (RNNR - RNNoise neural net)   [UI disabled for now]
+ *   3 = NR3  (RNNR - RNNoise neural net)
  *   4 = NR4  (SBNR - libspecbleach)        [UI disabled for now]
  *
  * Extensions implemented:
@@ -94,13 +94,17 @@ enum {
     PARAM_EMNR_NPE_METHOD   = 7,  /* 0=OSMS, 1=MMSE           (stepped)       */
     PARAM_EMNR_AE_RUN       = 8,  /* 0=off,  1=on             (stepped)       */
 
+    /* NR3 - RNNoise neural net (RNNR) */
+    PARAM_NR3_MODEL         = 9,  /* 0=Standard, 1=Small, 2=Large (stepped)   */
+    PARAM_NR3_STRENGTH      = 10, /* 0.0=bypass, 1.0=full denoising           */
+
     PARAM_COUNT
 };
 
 /* -----------------------------------------------------------------------
  * State save/load format  (bump version when layout changes)
  * --------------------------------------------------------------------- */
-#define STATE_VERSION  1U
+#define STATE_VERSION  3U
 
 typedef struct {
     uint32_t version;
@@ -113,6 +117,8 @@ typedef struct {
     int32_t  emnr_gain_method;
     int32_t  emnr_npe_method;
     int32_t  emnr_ae_run;
+    int32_t  nr3_model;       /* new in v2: 0=Standard, 1=Small, 2=Large */
+    float    nr3_strength;    /* new in v3: 0.0=bypass, 1.0=full         */
 } clap_nr_state_t;
 
 /* -----------------------------------------------------------------------
@@ -155,6 +161,17 @@ typedef struct {
     int    emnr_gain_method;
     int    emnr_npe_method;
     int    emnr_ae_run;
+    int    nr3_model;    /* 0=Standard (built-in), 1=Small, 2=Large */
+    float  nr3_strength; /* 0.0=bypass, 1.0=full denoising           */
+
+    /* ---- RNNR direct-call staging (bypasses xrnnr's internal ring buffer
+     * so that any host block size works correctly, not just chunks of
+     * exactly 480 samples).  Styled identically to the EMNR ring above. */
+    float  rnnr_inbuf[2][480];  /* accumulate 480 input samples per frame  */
+    float  rnnr_outbuf[2][480]; /* processed output, drained sample by sample */
+    int    rnnr_in_count[2];    /* samples currently staged in rnnr_inbuf    */
+    int    rnnr_out_head[2];    /* next unread index in rnnr_outbuf           */
+    int    rnnr_out_avail[2];   /* samples ready to drain in rnnr_outbuf     */
 
     /* ---- GUI ---- */
     clap_nr_gui_t *gui;
@@ -169,6 +186,7 @@ typedef struct {
      * state is only ever modified from the audio thread, eliminating
      * the race between the GUI/main thread and the audio thread. */
     bool params_dirty;
+    bool nr3_model_dirty;  /* set when nr3_model changes; triggers RNNRloadModel */
 
     /* True between a successful activate() and the subsequent deactivate().
      * process() checks this flag and does passthrough if false, guarding
@@ -294,6 +312,9 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
     /* Detect transition INTO NR2 before updating run flags */
     bool entering_nr2 = (new_mode == 2) &&
                         (self->emnr[0] ? (self->emnr[0]->run == 0) : false);
+    /* Detect transition INTO NR3 before updating run flags */
+    bool entering_nr3 = (new_mode == 3) &&
+                        (self->rnnr[0] ? (self->rnnr[0]->run == 0) : false);
     self->nr_mode = new_mode;
     for (int ch = 0; ch < 2; ++ch) {
         if (self->anr[ch])  self->anr[ch]->run  = (new_mode == 1) ? 1 : 0;
@@ -308,6 +329,15 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
             self->emnr_out_head[ch]  = 0;
             self->emnr_out_avail[ch] = 0;
         }
+        /* For NR3 entry, clear the staging buffers so the first output frame
+         * isn't contaminated by stale samples from a previous NR3 session. */
+        if (entering_nr3) {
+            self->rnnr_in_count[ch]  = 0;
+            self->rnnr_out_head[ch]  = 0;
+            self->rnnr_out_avail[ch] = 0;
+            memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
+            memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
+        }
     }
     nr_log("apply_nr_mode: mode=%d  emnr[0].run=%d emnr[1].run=%d  reset=%d",
            new_mode,
@@ -319,6 +349,42 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
 /* -----------------------------------------------------------------------
  * Helper: dispatch a single incoming CLAP param event
  * --------------------------------------------------------------------- */
+/* -----------------------------------------------------------------------
+ * Helper: load the NR3 (RNNR) model file matching self->nr3_model.
+ * 0 = built-in  (NULL model)
+ * 1 = rnnoise_weights_small.bin  (beside the .clap)
+ * 2 = rnnoise_weights_large.bin  (beside the .clap)
+ * If the file cannot be found, falls back to the built-in model silently.
+ * --------------------------------------------------------------------- */
+static void apply_nr3_model(clap_nr_t *self)
+{
+    if (self->nr3_model == 0) {
+        RNNRloadModel(NULL);
+        return;
+    }
+    char path[MAX_PATH];
+    HMODULE hmod = GetModuleHandleA("clap-nr.clap");
+    if (!hmod || !GetModuleFileNameA(hmod, path, MAX_PATH)) {
+        RNNRloadModel(NULL);
+        return;
+    }
+    char *slash = strrchr(path, '\\');
+    if (!slash) { RNNRloadModel(NULL); return; }
+    *(slash + 1) = '\0';
+    const char *fname = (self->nr3_model == 1)
+                        ? "rnnoise_weights_small.bin"
+                        : "rnnoise_weights_large.bin";
+    size_t dlen = strlen(path);
+    size_t flen = strlen(fname);
+    if (dlen + flen < MAX_PATH)
+        memcpy(path + dlen, fname, flen + 1);
+    else {
+        RNNRloadModel(NULL);
+        return;
+    }
+    RNNRloadModel(path);
+}
+
 static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *pv)
 {
     /* Update only the cached parameter values.  Do NOT call apply_*() here.
@@ -336,6 +402,11 @@ static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *
     case PARAM_EMNR_GAIN_METHOD: self->emnr_gain_method = (int)pv->value;  break;
     case PARAM_EMNR_NPE_METHOD:  self->emnr_npe_method  = (int)pv->value;  break;
     case PARAM_EMNR_AE_RUN:      self->emnr_ae_run      = (int)pv->value;  break;
+    case PARAM_NR3_MODEL:
+        self->nr3_model  = (int)pv->value;
+        self->nr3_model_dirty = true;
+        break;
+    case PARAM_NR3_STRENGTH: self->nr3_strength = (float)pv->value; break;
     default: break;
     }
     self->params_dirty = true;
@@ -358,6 +429,16 @@ static void on_gui_param_change(void *plugin_ptr, clap_id param_id, double value
     /* Mark dirty so params_flush notifies the host */
     if (param_id < PARAM_COUNT)
         self->param_dirty[param_id] = true;
+
+    /* NR3 model loading reads a file (rnnoise_model_from_filename).  Do it
+     * here on the main thread so the audio thread is never blocked by I/O.
+     * handle_param_event already set nr3_model and nr3_model_dirty; clear
+     * the dirty flag so the audio-thread path (params_dirty block) won't
+     * also try to call request_callback for a no-op reload. */
+    if (param_id == PARAM_NR3_MODEL) {
+        apply_nr3_model(self);
+        self->nr3_model_dirty = false;
+    }
 
     /* Ask the host to call params_flush so it records the new value */
     const clap_host_params_t *hp =
@@ -471,6 +552,11 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 nr_log("activate: creating RNNR ch=%d", ch);
                 self->rnnr[ch] = create_rnnr(0, 0, (int)max_frames,
                                              self->buf[ch], self->buf[ch], (int)sr);
+                self->rnnr_in_count[ch]  = 0;
+                self->rnnr_out_head[ch]  = 0;
+                self->rnnr_out_avail[ch] = 0;
+                memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
+                memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
 
                 nr_log("activate: creating SBNR ch=%d", ch);
                 self->sbnr[ch] = create_sbnr(0, 0, (int)max_frames,
@@ -525,6 +611,11 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                         setSize_rnnr   (self->rnnr[ch], (int)max_frames);
                         setBuffers_rnnr(self->rnnr[ch], self->buf[ch], self->buf[ch]);
                     }
+                    self->rnnr_in_count[ch]  = 0;
+                    self->rnnr_out_head[ch]  = 0;
+                    self->rnnr_out_avail[ch] = 0;
+                    memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
+                    memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
                     if (self->sbnr[ch]) {
                         setSize_sbnr   (self->sbnr[ch], (int)max_frames);
                         setBuffers_sbnr(self->sbnr[ch], self->buf[ch], self->buf[ch]);
@@ -559,6 +650,13 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                  * drains their ring buffers on the next process() call. */
                 if (self->buf[ch])
                     memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
+                /* Reset RNNR plugin-level staging so the next process() call
+                 * starts with empty accumulator and no stale output queued. */
+                self->rnnr_in_count[ch]  = 0;
+                self->rnnr_out_head[ch]  = 0;
+                self->rnnr_out_avail[ch] = 0;
+                memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
+                memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
             }
             nr_log("reactivate: flushed, sr=%.0f frames=%u", sr, max_frames);
         }
@@ -631,6 +729,14 @@ static void plugin_reset(const clap_plugin_t *p)
             if (self->buf[ch] && self->block_size > 0)
                 memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
         }
+        /* Reset RNNR staging buffers (NR already zeroed buf[ch]) */
+        for (int ch = 0; ch < 2; ++ch) {
+            self->rnnr_in_count[ch]  = 0;
+            self->rnnr_out_head[ch]  = 0;
+            self->rnnr_out_avail[ch] = 0;
+            memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
+            memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         nr_log("reset: SEH exception 0x%08lX", (unsigned long)GetExceptionCode());
@@ -683,6 +789,13 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         apply_emnr_params(self);
         for (int _ch = 0; _ch < 2; ++_ch)
             if (self->sbnr[_ch]) self->sbnr[_ch]->reduction_amount = self->nr4_reduction;
+        if (self->nr3_model_dirty) {
+            /* Model loading is file I/O -- must not happen on the audio thread.
+             * Request a main-thread callback; plugin_on_main_thread will call
+             * apply_nr3_model() there.  Keep nr3_model_dirty set so the callback
+             * handler knows work is pending. */
+            self->host->request_callback(self->host);
+        }
         self->params_dirty = false;
     }
 
@@ -793,7 +906,54 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                     }
                 }
             }
-            if (self->rnnr[ch]) xrnnr(self->rnnr[ch], 0);
+            if (self->rnnr[ch] && self->rnnr[ch]->run) {
+                /* RNNR: accumulate 480-sample frames and call rnnoise_process_frame
+                 * directly, bypassing xrnnr's internal ring buffer.  xrnnr assumes
+                 * buffer_size == 480 (one RNNoise frame), so when the host delivers
+                 * any other block size (typically a power of two -- 256, 512, 1024)
+                 * the output ring drains faster than it fills, causing periodic
+                 * passthrough glitches every ~150-200 ms.  This staging loop works
+                 * correctly for ANY host block size, mirroring what EMNR does.
+                 *
+                 * Scaling: rnnoise_process_frame expects float values in the 16-bit
+                 * PCM range (~+-32 768).  Multiply by 32768 before, divide after. */
+                float *inbuf   = self->rnnr_inbuf[ch];
+                float *outbuf  = self->rnnr_outbuf[ch];
+                int *in_count  = &self->rnnr_in_count[ch];
+                int *out_head  = &self->rnnr_out_head[ch];
+                int *out_avail = &self->rnnr_out_avail[ch];
+
+                for (uint32_t s = 0; s < n; ++s) {
+                    /* Stage one input sample at PCM scale */
+                    inbuf[(*in_count)++] = (float)(self->buf[ch][2 * s] * 32768.0);
+
+                    if (*in_count == 480) {
+                        /* Full 480-sample frame: call RNNoise directly.
+                         * Lock cs so RNNRloadModel can safely swap st. */
+                        EnterCriticalSection(&self->rnnr[ch]->cs);
+                        rnnoise_process_frame(self->rnnr[ch]->st, outbuf, inbuf);
+                        LeaveCriticalSection(&self->rnnr[ch]->cs);
+                        if (self->nr3_strength < 1.0f) {
+                            float s = self->nr3_strength;
+                            float t = 1.0f - s;
+                            for (int j = 0; j < 480; ++j)
+                                outbuf[j] = s * outbuf[j] + t * inbuf[j];
+                        }
+                        *in_count  = 0;
+                        *out_head  = 0;
+                        *out_avail = 480;
+                    }
+
+                    /* Drain one sample back (latency = one 480-sample frame
+                     * = 10 ms at 48 kHz until first output is ready) */
+                    if (*out_avail > 0) {
+                        self->buf[ch][2 * s] =
+                            (double)outbuf[(*out_head)++] * (1.0 / 32768.0);
+                        (*out_avail)--;
+                    }
+                    /* else: input passthrough for this sample while pipeline fills */
+                }
+            }
             if (self->sbnr[ch]) {
                 /* Update buffer_size to the actual host frame count every call,
                  * just like ANR does with buff_size.  Without this, xsbnr loops
@@ -896,6 +1056,20 @@ static bool params_get_info(const clap_plugin_t *p, uint32_t idx, clap_param_inf
         snprintf(info->module, sizeof(info->module), "NR2");
         info->min_value = 0; info->max_value = 1; info->default_value = 1;
         return true;
+    case PARAM_NR3_MODEL:
+        info->id = PARAM_NR3_MODEL;
+        info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
+        snprintf(info->name,   sizeof(info->name),   "NR3 Model");
+        snprintf(info->module, sizeof(info->module), "NR3");
+        info->min_value = 0; info->max_value = 2; info->default_value = 0;
+        return true;
+    case PARAM_NR3_STRENGTH:
+        info->id = PARAM_NR3_STRENGTH;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+        snprintf(info->name,   sizeof(info->name),   "NR3 Suppression");
+        snprintf(info->module, sizeof(info->module), "NR3");
+        info->min_value = 0.0; info->max_value = 1.0; info->default_value = 1.0;
+        return true;
     default: return false;
     }
 }
@@ -913,6 +1087,8 @@ static bool params_get_value(const clap_plugin_t *p, clap_id id, double *out)
     case PARAM_EMNR_GAIN_METHOD: *out = (double)self->emnr_gain_method;  return true;
     case PARAM_EMNR_NPE_METHOD:  *out = (double)self->emnr_npe_method;   return true;
     case PARAM_EMNR_AE_RUN:      *out = (double)self->emnr_ae_run;       return true;
+    case PARAM_NR3_MODEL:        *out = (double)self->nr3_model;         return true;
+    case PARAM_NR3_STRENGTH:     *out = (double)self->nr3_strength;      return true;
     default: return false;
     }
 }
@@ -948,6 +1124,13 @@ static bool params_value_to_text(const clap_plugin_t *p, clap_id id, double val,
         return true; }
     case PARAM_EMNR_AE_RUN:
         snprintf(buf, size, "%s", (int)val ? "On" : "Off"); return true;
+    case PARAM_NR3_MODEL: {
+        static const char *names[] = { "Standard", "Small", "Large" };
+        int i = (int)val;
+        snprintf(buf, size, "%s", (i >= 0 && i <= 2) ? names[i] : "?");
+        return true; }
+    case PARAM_NR3_STRENGTH:
+        snprintf(buf, size, "%.0f%%", val * 100.0); return true;
     default: return false;
     }
 }
@@ -1041,6 +1224,8 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *stream)
     s.emnr_gain_method  = self->emnr_gain_method;
     s.emnr_npe_method   = self->emnr_npe_method;
     s.emnr_ae_run       = self->emnr_ae_run;
+    s.nr3_model         = self->nr3_model;
+    s.nr3_strength      = self->nr3_strength;
     return stream->write(stream, &s, sizeof(s)) == (int64_t)sizeof(s);
 }
 
@@ -1048,8 +1233,21 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
 {
     clap_nr_t *self = (clap_nr_t *)p;
     clap_nr_state_t s;
-    if (stream->read(stream, &s, sizeof(s)) != (int64_t)sizeof(s)) return false;
-    if (s.version != STATE_VERSION) return false;
+    memset(&s, 0, sizeof(s));
+    int64_t got = stream->read(stream, &s, sizeof(s));
+    /* Minimum bytes for each version:
+     *   v1 = 52 bytes  (no nr3_model)
+     *   v2 = 56 bytes  (adds nr3_model)
+     *   v3 = 60 bytes  (adds nr3_strength) */
+    if (got < (int64_t)sizeof(uint32_t)) return false;
+    uint32_t min_bytes;
+    switch (s.version) {
+    case 1U: min_bytes = 52; break;
+    case 2U: min_bytes = 56; break;
+    case 3U: min_bytes = 60; break;
+    default: return false;
+    }
+    if (got < (int64_t)min_bytes) return false;
 
     self->nr4_reduction     = s.nr4_reduction;
     self->anr_taps          = (s.anr_taps  >= 16  && s.anr_taps  <= 2048) ? s.anr_taps  : 64;
@@ -1060,9 +1258,21 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     self->emnr_npe_method   = (s.emnr_npe_method  >= 0 && s.emnr_npe_method  <= 1) ? s.emnr_npe_method  : 0;
     self->emnr_ae_run       = (s.emnr_ae_run == 0 || s.emnr_ae_run == 1) ? s.emnr_ae_run : 1;
 
+    /* nr3_model: only trust the field from v2 onwards; v1 trailing bytes are garbage */
+    if (s.version >= 2U)
+        self->nr3_model = (s.nr3_model >= 0 && s.nr3_model <= 2) ? s.nr3_model : 2;
+    else
+        self->nr3_model = 2;  /* default Large for upgraded v1 states */
+
+    /* nr3_strength: from v3 onwards; default full suppression for older states */
+    self->nr3_strength = (s.version >= 3U)
+        ? ((s.nr3_strength >= 0.0f && s.nr3_strength <= 1.0f) ? s.nr3_strength : 1.0f)
+        : 1.0f;
+
     apply_nr_mode(self, (s.nr_mode >= 0 && s.nr_mode <= 4) ? s.nr_mode : 0);
     apply_anr_params(self);
     apply_emnr_params(self);
+    apply_nr3_model(self);
 
     if (self->gui) {
         gui_set_param(self->gui, PARAM_NR_MODE,          (double)self->nr_mode);
@@ -1073,6 +1283,8 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
         gui_set_param(self->gui, PARAM_EMNR_GAIN_METHOD, (double)self->emnr_gain_method);
         gui_set_param(self->gui, PARAM_EMNR_NPE_METHOD,  (double)self->emnr_npe_method);
         gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
+        gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
+        gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
     }
     return true;
 }
@@ -1235,7 +1447,16 @@ static const void *plugin_get_extension(const clap_plugin_t *p, const char *id)
     return NULL;
 }
 
-static void plugin_on_main_thread(const clap_plugin_t *p) { (void)p; }
+static void plugin_on_main_thread(const clap_plugin_t *p)
+{
+    clap_nr_t *self = (clap_nr_t *)p;
+    /* Apply any NR3 model change that was deferred from the audio thread
+     * (host automation of PARAM_NR3_MODEL).  File I/O is safe here. */
+    if (self->nr3_model_dirty) {
+        apply_nr3_model(self);
+        self->nr3_model_dirty = false;
+    }
+}
 
 /* -----------------------------------------------------------------------
  * Audio ports  -  stereo in / stereo out
@@ -1332,6 +1553,7 @@ static const clap_plugin_t *factory_create_plugin(const clap_plugin_factory_t *f
     self->emnr_gain_method  = 2;   /* MM-LSA */
     self->emnr_npe_method   = 0;   /* OSMS   */
     self->emnr_ae_run       = 1;
+    self->nr3_strength      = 1.0f;
 
     return pl;
 }

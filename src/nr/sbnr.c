@@ -50,15 +50,13 @@ https://github.com/lucianodato/libspecbleach
 
 void setSize_sbnr (SBNR a, int size)
 {
-    if (size == a->buffer_size) return;
-    a->buffer_size = size;
-    specbleach_adaptive_free(a->st);
-    float frame_ms = (float)size * 1000.0f / (float)a->rate;
-    a->st = specbleach_adaptive_initialize((uint32_t)a->rate, frame_ms);
-    _aligned_free(a->input);
-    _aligned_free(a->output);
-    a->input  = malloc0(size * sizeof(float));
-    a->output = malloc0(size * sizeof(float));
+    /* The 20 ms internal frame is independent of host block size.
+     * Just update buffer_size and flush the ring so the next block
+     * starts clean without stale samples. */
+    a->buffer_size    = size;
+    a->ring_in_count  = 0;
+    a->ring_out_avail = 0;
+    a->ring_out_head  = 0;
 }
 
 void setBuffers_sbnr (SBNR a, double* in, double* out)
@@ -82,11 +80,20 @@ SBNR create_sbnr (int run, int position, int size, double *in, double *out, int 
     a->noise_scaling_type = 0;
     a->noise_rescale = 2.F;
     a->post_filter_threshold = 0.F;  /* 0 = neutral; -10 over-activates the post-filter */
-    a->buffer_size = size;
-    float frame_ms = (float)size * 1000.0f / (float)rate;
-    a->st     = specbleach_adaptive_initialize((uint32_t)rate, frame_ms);
-    a->input  = malloc0(size * sizeof(float));
-    a->output = malloc0(size * sizeof(float));
+    a->buffer_size    = size;
+    /* Fixed 20 ms internal frame -- specbleach needs at least 20 ms for
+     * good spectral resolution.  Shorter frames (e.g. 10 ms at bs=480)
+     * give coarse 100 Hz bins that cause over-subtraction clicking and
+     * weak suppression.  A ring buffer decouples the host block size
+     * from the specbleach frame size. */
+    a->frame_samples  = (int)ceilf(20.0f * (float)rate / 1000.0f);
+    a->st             = specbleach_adaptive_initialize((uint32_t)rate, 20.0f);
+    a->input          = malloc0(a->frame_samples * sizeof(float));
+    a->output         = malloc0(a->frame_samples * sizeof(float));
+    a->outq           = malloc0(a->frame_samples * sizeof(float));
+    a->ring_in_count  = 0;
+    a->ring_out_avail = 0;
+    a->ring_out_head  = 0;
 
     return a;
 }
@@ -94,13 +101,18 @@ SBNR create_sbnr (int run, int position, int size, double *in, double *out, int 
 void setSamplerate_sbnr(SBNR a, int rate)
 {
     specbleach_adaptive_free(a->st);
-    a->rate = rate;
-    float frame_ms = (float)a->buffer_size * 1000.0f / (float)rate;
-    a->st = specbleach_adaptive_initialize((uint32_t)rate, frame_ms);
+    a->rate          = rate;
+    a->frame_samples = (int)ceilf(20.0f * (float)rate / 1000.0f);
+    a->st            = specbleach_adaptive_initialize((uint32_t)rate, 20.0f);
     _aligned_free(a->input);
     _aligned_free(a->output);
-    a->input  = malloc0(a->buffer_size * sizeof(float));
-    a->output = malloc0(a->buffer_size * sizeof(float));
+    _aligned_free(a->outq);
+    a->input          = malloc0(a->frame_samples * sizeof(float));
+    a->output         = malloc0(a->frame_samples * sizeof(float));
+    a->outq           = malloc0(a->frame_samples * sizeof(float));
+    a->ring_in_count  = 0;
+    a->ring_out_avail = 0;
+    a->ring_out_head  = 0;
 }
 
 void xsbnr (SBNR a, int pos)
@@ -121,16 +133,42 @@ void xsbnr (SBNR a, int pos)
         double *in  = a->in;
         double *out = a->out;
         int     bs  = a->buffer_size;
-
-        for (int i = 0; i < bs; i++)
-            a->input[i] = (float)in[2 * i];
-
-        specbleach_adaptive_process(a->st, (uint32_t)bs, a->input, a->output);
+        int     fs  = a->frame_samples;
 
         for (int i = 0; i < bs; i++)
         {
-            out[2 * i]     = (double)a->output[i];
-            out[2 * i + 1] = 0.0;
+            /* Stage one real input sample into the 20 ms accumulation buffer */
+            a->input[a->ring_in_count++] = (float)in[2 * i];
+
+            if (a->ring_in_count == fs)
+            {
+                /* Full 20 ms frame -- process and copy to the separate drain
+                 * queue.  At this point ring_out_avail is always 0 (we drain
+                 * exactly 1 sample per staged sample, so the queue is fully
+                 * consumed before the next 960-sample frame is ready), so
+                 * overwriting outq is safe. */
+                specbleach_adaptive_process(a->st, (uint32_t)fs,
+                                            a->input, a->output);
+                memcpy(a->outq, a->output, (size_t)fs * sizeof(float));
+                a->ring_in_count  = 0;
+                a->ring_out_avail = fs;
+                a->ring_out_head  = 0;
+            }
+
+            /* Drain one sample from the output queue back into the buffer */
+            if (a->ring_out_avail > 0)
+            {
+                out[2 * i]     = (double)a->outq[a->ring_out_head++];
+                out[2 * i + 1] = 0.0;
+                a->ring_out_avail--;
+            }
+            else
+            {
+                /* Latency fill -- silence for the first ~20 ms after startup
+                 * or after a mode switch while the ring accumulates. */
+                out[2 * i]     = 0.0;
+                out[2 * i + 1] = 0.0;
+            }
         }
     }
     else if (a->out != a->in) 
@@ -144,6 +182,7 @@ void destroy_sbnr (SBNR a)
     specbleach_adaptive_free(a->st);
     _aligned_free(a->input);
     _aligned_free(a->output);
+    _aligned_free(a->outq);
     _aligned_free(a);
 }
 

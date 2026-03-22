@@ -794,7 +794,15 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 }
             }
             if (self->rnnr[ch]) xrnnr(self->rnnr[ch], 0);
-            if (self->sbnr[ch]) xsbnr(self->sbnr[ch], 0);
+            if (self->sbnr[ch]) {
+                /* Update buffer_size to the actual host frame count every call,
+                 * just like ANR does with buff_size.  Without this, xsbnr loops
+                 * over all max_frames (e.g. 8192) instead of just n (e.g. 480),
+                 * and the real processed audio lands at indices >> n in buf[ch]
+                 * which are never read back -- producing silence. */
+                self->sbnr[ch]->buffer_size = (int)n;
+                xsbnr(self->sbnr[ch], 0);
+            }
 
             /* Read back the real (even) output slots only */
             for (uint32_t i = 0; i < n; ++i)

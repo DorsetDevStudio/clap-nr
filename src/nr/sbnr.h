@@ -65,8 +65,13 @@ typedef struct _sbnr
         int buffer_size;
         int rate;
 
-        float* input;         /* float conversion buffer [buffer_size floats] */
-        float* output;        /* float conversion buffer [buffer_size floats] */
+        float* input;         /* staging buffer   [frame_samples floats] */
+        float* output;        /* specbleach out   [frame_samples floats] */
+        float* outq;          /* flat output queue[frame_samples floats] */
+        int    frame_samples; /* ceil(20 ms * rate/1000) -- fixed 20 ms  */
+        int    ring_in_count; /* input samples staged so far             */
+        int    ring_out_avail;/* output samples ready to drain           */
+        int    ring_out_head; /* read position in outq[]                 */
 } sbnr, *SBNR;
 
 // define the public api of this module

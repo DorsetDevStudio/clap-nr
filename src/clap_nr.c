@@ -60,6 +60,13 @@
 #include "gui.h"
 #include "version.h"
 
+/* EMNR requires bsize >= incr = fsize/ovrlp = 4096/4 = 1024.
+ * The host may deliver fewer than 1024 samples per block, so we
+ * accumulate into a fixed 1024-sample working buffer and drain into
+ * a matching output ring.  xemnr is called exactly once per 1024
+ * input samples, exactly as Thetis uses dsp_size=1024. */
+#define EMNR_BSIZE  1024
+
 /* -----------------------------------------------------------------------
  * Plugin identity
  * --------------------------------------------------------------------- */
@@ -68,12 +75,6 @@
 #define PLUGIN_VENDOR  "Station Master"
 #define PLUGIN_VERSION CLAP_NR_VERSION_STR
 #define PLUGIN_URL     ""
-
-/* EMNR_CHUNK: number of samples fed to xemnr per call.
- * Must be smaller than fsize (4096) so the STFT accumulates real audio
- * across multiple process() blocks.  128 works for any practical host
- * block size (hosts typically use 64-512 frames per block). */
-#define EMNR_CHUNK 128
 
 /* -----------------------------------------------------------------------
  * Parameter IDs  (must stay stable - used in saved state)
@@ -134,6 +135,15 @@ typedef struct {
 
     /* Per-channel double-precision in-place buffers */
     double *buf[2];
+
+    /* EMNR uses a fixed 1024-sample bsize.  These rings decouple the
+     * host block size from xemnr's required stride. */
+    double  emnr_inbuf[2][2 * EMNR_BSIZE];   /* interleaved complex input for xemnr  */
+    double  emnr_outbuf[2][2 * EMNR_BSIZE];  /* interleaved complex output from xemnr */
+    double  emnr_outq[2][EMNR_BSIZE];        /* flat real output queue (pop from here) */
+    int     emnr_in_count[2];                 /* samples fed into emnr_inbuf so far     */
+    int     emnr_out_head[2];                 /* next unread index in emnr_outq          */
+    int     emnr_out_avail[2];                /* samples ready to read in emnr_outq      */
 
     /* ---- Parameter values ---- */
     int    nr_mode;
@@ -419,15 +429,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
             self->block_size  = max_frames;
 
             for (int ch = 0; ch < 2; ++ch) {
-                /* NR algorithms use interleaved complex (I/Q) layout:
-                 * index [2*i+0] = real sample, [2*i+1] = imaginary (kept 0). */
-                /* Allocate EMNR_CHUNK extra headroom so the EMNR chunked-stride
-                 * loop never reads/writes past the end of the buffer when
-                 * max_frames is not a multiple of EMNR_CHUNK (e.g. 480 at 48 kHz).
-                 * n_rounded = ceil(max_frames/EMNR_CHUNK)*EMNR_CHUNK can exceed
-                 * max_frames by up to EMNR_CHUNK-1 samples; the extra allocation
-                 * covers that entire overflow region with valid zeroed memory. */
-                self->buf[ch] = (double *)calloc(2 * (max_frames + EMNR_CHUNK), sizeof(double));
+                self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
                 if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); __leave; }
 
                 nr_log("activate: creating ANR ch=%d sr=%.0f frames=%u", ch, sr, max_frames);
@@ -439,17 +441,26 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                                             120.0, 120.0, 200.0, 0.001, 6.25e-10, 1.0, 3.0);
 
                 nr_log("activate: creating EMNR ch=%d", ch);
-                /* EMNR must be created with a small fixed bsize that matches
-                 * how many samples we feed it per call.  Using max_frames here
-                 * was the NR2 silence bug: the host delivers ~480 samples per
-                 * block, but EMNR thought it was processing 8192, so the STFT
-                 * frames were almost entirely zero-padded and lambda_y stayed 0. */
-                self->emnr[ch] = create_emnr(0, 0, EMNR_CHUNK,
-                                             self->buf[ch], self->buf[ch],
+                /* Create EMNR with the actual host block size, exactly as
+                 * Thetis does.  xemnr() is a stateful streaming processor
+                 * with internal STFT ring buffers; it must be called once per
+                 * block with the full buffer.  Calling it in small fixed-size
+                 * chunks while shifting the in/out pointer each call causes
+                 * the output accumulator to be read from the wrong offset,
+                 * producing severe digital distortion on all signals. */
+                self->emnr[ch] = create_emnr(0, 0, EMNR_BSIZE,
+                                             self->emnr_inbuf[ch],
+                                             self->emnr_outbuf[ch],
                                              4096, 4, (int)sr, 0, 1.0,
                                              self->emnr_gain_method,
                                              self->emnr_npe_method,
                                              self->emnr_ae_run);
+                self->emnr_in_count[ch]  = 0;
+                self->emnr_out_head[ch]  = 0;
+                self->emnr_out_avail[ch] = 0;
+                memset(self->emnr_inbuf[ch],  0, sizeof(self->emnr_inbuf[ch]));
+                memset(self->emnr_outbuf[ch], 0, sizeof(self->emnr_outbuf[ch]));
+                memset(self->emnr_outq[ch],   0, sizeof(self->emnr_outq[ch]));
 
                 nr_log("activate: creating RNNR ch=%d", ch);
                 self->rnnr[ch] = create_rnnr(0, 0, (int)max_frames,
@@ -486,8 +497,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 nr_log("reactivate: block size %u -> %u", self->block_size, max_frames);
                 for (int ch = 0; ch < 2; ++ch) {
                     free(self->buf[ch]);
-                    /* Same EMNR_CHUNK headroom as the first-activation path. */
-                    self->buf[ch] = (double *)calloc(2 * (max_frames + EMNR_CHUNK), sizeof(double));
+                    self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
                     if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); __leave; }
 
                     if (self->anr[ch]) {
@@ -495,8 +505,15 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                         setBuffers_anr(self->anr[ch],  self->buf[ch], self->buf[ch]);
                     }
                     if (self->emnr[ch]) {
-                        setSize_emnr   (self->emnr[ch], (int)max_frames);
-                        setBuffers_emnr(self->emnr[ch], self->buf[ch], self->buf[ch]);
+                        /* EMNR bsize is always EMNR_BSIZE=1024 regardless of
+                         * host block size.  Its in/out pointers are the
+                         * dedicated emnr_inbuf/emnr_outbuf, not buf[ch]. */
+                        self->emnr_in_count[ch]  = 0;
+                        self->emnr_out_head[ch]  = 0;
+                        self->emnr_out_avail[ch] = 0;
+                        memset(self->emnr_inbuf[ch],  0, sizeof(self->emnr_inbuf[ch]));
+                        memset(self->emnr_outbuf[ch], 0, sizeof(self->emnr_outbuf[ch]));
+                        memset(self->emnr_outq[ch],   0, sizeof(self->emnr_outq[ch]));
                     }
                     if (self->rnnr[ch]) {
                         setSize_rnnr   (self->rnnr[ch], (int)max_frames);
@@ -523,11 +540,19 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
             /* Flush filter / accumulator state for a clean restart */
             for (int ch = 0; ch < 2; ++ch) {
                 if (self->anr[ch])  flush_anr (self->anr[ch]);
-                if (self->emnr[ch]) flush_emnr(self->emnr[ch]);
+                if (self->emnr[ch]) {
+                    flush_emnr(self->emnr[ch]);
+                    self->emnr_in_count[ch]  = 0;
+                    self->emnr_out_head[ch]  = 0;
+                    self->emnr_out_avail[ch] = 0;
+                    memset(self->emnr_inbuf[ch],  0, sizeof(self->emnr_inbuf[ch]));
+                    memset(self->emnr_outbuf[ch], 0, sizeof(self->emnr_outbuf[ch]));
+                    memset(self->emnr_outq[ch],   0, sizeof(self->emnr_outq[ch]));
+                }
                 /* RNNR / SBNR have no flush function; zeroing the shared buffer
                  * drains their ring buffers on the next process() call. */
                 if (self->buf[ch])
-                    memset(self->buf[ch], 0, 2 * (self->block_size + EMNR_CHUNK) * sizeof(double));
+                    memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
             }
             nr_log("reactivate: flushed, sr=%.0f frames=%u", sr, max_frames);
         }
@@ -586,14 +611,19 @@ static void plugin_reset(const clap_plugin_t *p)
     __try {
         for (int ch = 0; ch < 2; ++ch) {
             if (self->anr[ch])  flush_anr(self->anr[ch]);
-            if (self->emnr[ch]) flush_emnr(self->emnr[ch]);
+            if (self->emnr[ch]) {
+                flush_emnr(self->emnr[ch]);
+                self->emnr_in_count[ch]  = 0;
+                self->emnr_out_head[ch]  = 0;
+                self->emnr_out_avail[ch] = 0;
+                memset(self->emnr_inbuf[ch],  0, sizeof(self->emnr_inbuf[ch]));
+                memset(self->emnr_outbuf[ch], 0, sizeof(self->emnr_outbuf[ch]));
+                memset(self->emnr_outq[ch],   0, sizeof(self->emnr_outq[ch]));
+            }
             /* RNNR and SBNR have no flush function; zero the shared I/O
-             * buffer which effectively drains their ring buffers on the
-             * next process() call.  Clear the full allocation (including
-             * the EMNR_CHUNK headroom) to avoid stale data in the overlap
-             * region after a block-size or sample-rate change. */
+             * buffer to drain their ring buffers on the next process() call. */
             if (self->buf[ch] && self->block_size > 0)
-                memset(self->buf[ch], 0, 2 * (self->block_size + EMNR_CHUNK) * sizeof(double));
+                memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
         }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -695,20 +725,14 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 self->buf[ch][2 * i + 1] = 0.0;
             }
 
-            /* Compute the EMNR stride ceiling before zero-padding so the
-             * same value is used for both the pad extent and the loop limit.
-             * n_rounded can exceed blk by up to EMNR_CHUNK-1 when max_frames
-             * is not a multiple of EMNR_CHUNK (e.g. 480 at 48 kHz).  The
-             * buffer was allocated with EMNR_CHUNK extra headroom exactly to
-             * cover this, making the write to buf[ch][2*blk..2*n_rounded-1]
-             * safe.  Zeroing up to pad_to ensures those extra slots hold
-             * clean zeros rather than stale output from a previous call. */
-            uint32_t blk      = self->block_size;
-            uint32_t n_rounded = ((n + EMNR_CHUNK - 1) / EMNR_CHUNK) * EMNR_CHUNK;
-            uint32_t pad_to   = (n_rounded > blk) ? n_rounded : blk;
-            for (uint32_t i = n; i < pad_to; ++i) {
-                self->buf[ch][2 * i]     = 0.0;
-                self->buf[ch][2 * i + 1] = 0.0;
+            /* Zero any tail samples between n and block_size so stale data
+             * from a previous block doesn't bleed into the current one. */
+            uint32_t blk = self->block_size;
+            if (n < blk) {
+                for (uint32_t i = n; i < blk; ++i) {
+                    self->buf[ch][2 * i]     = 0.0;
+                    self->buf[ch][2 * i + 1] = 0.0;
+                }
             }
 
             /* ANR is a sample-by-sample LMS filter: updating buff_size to
@@ -718,19 +742,45 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 xanr(self->anr[ch], 0);
             }
             if (self->emnr[ch]) {
-                /* EMNR processes audio in fixed EMNR_CHUNK-sample strides.
-                 * buf[ch] is zero-padded to n_rounded (above) so every stride
-                 * reads only zeroed or valid audio data within the allocation. */
+                /* Push n real samples into the EMNR input ring, call xemnr
+                 * in EMNR_BSIZE=1024 strides, collect output into a flat
+                 * real output queue, then pop n samples back into buf[ch].
+                 *
+                 * EMNR has STFT latency (~3072 samples at fsize=4096/ovrlp=4
+                 * = 64 ms at 48 kHz).  While the output queue has not yet
+                 * filled we output silence, which is correct latency behaviour. */
                 EMNR em = self->emnr[ch];
-                uint32_t pos = 0;
-                while (pos < n_rounded) {
-                    setBuffers_emnr(em, self->buf[ch] + 2 * pos,
-                                        self->buf[ch] + 2 * pos);
-                    xemnr(em, 0);
-                    pos += EMNR_CHUNK;
+                double *inbuf  = self->emnr_inbuf[ch];
+                double *outbuf = self->emnr_outbuf[ch];
+                double *outq   = self->emnr_outq[ch];
+                int *in_count  = &self->emnr_in_count[ch];
+                int *out_head  = &self->emnr_out_head[ch];
+                int *out_avail = &self->emnr_out_avail[ch];
+
+                for (uint32_t s = 0; s < n; ++s) {
+                    /* Feed one real sample (imaginary = 0) */
+                    inbuf[2 * (*in_count) + 0] = self->buf[ch][2 * s];
+                    inbuf[2 * (*in_count) + 1] = 0.0;
+                    (*in_count)++;
+
+                    if (*in_count == EMNR_BSIZE) {
+                        /* Full 1024-sample block: run EMNR, extract real output */
+                        xemnr(em, 0);
+                        for (int k = 0; k < EMNR_BSIZE; ++k)
+                            outq[k] = outbuf[2 * k];  /* real part only */
+                        *in_count  = 0;
+                        *out_head  = 0;
+                        *out_avail = EMNR_BSIZE;
+                    }
+
+                    /* Pop one output sample back into the processing buffer */
+                    if (*out_avail > 0) {
+                        self->buf[ch][2 * s] = outq[(*out_head)++];
+                        (*out_avail)--;
+                    } else {
+                        self->buf[ch][2 * s] = 0.0;  /* STFT latency fill */
+                    }
                 }
-                /* Restore nominal pointer for consistency */
-                setBuffers_emnr(em, self->buf[ch], self->buf[ch]);
             }
             if (self->rnnr[ch]) xrnnr(self->rnnr[ch], 0);
             if (self->sbnr[ch]) xsbnr(self->sbnr[ch], 0);

@@ -15,7 +15,7 @@
  *   thread reads those cached values each frame - no locking needed because
  *   all writes are 32/64-bit aligned and the worst case is one stale frame.
  *
- * Copyright (C) 2025 - Stuart E. Green (G5STU)
+ * Copyright (C) 2026 - Stuart E. Green (G5STU)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -1027,7 +1027,7 @@ bool gui_show(clap_nr_gui_t *gui)
         POINT pt = { 200, 200 };
         GetCursorPos(&pt);
         DWORD style   = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
-        DWORD exstyle = WS_EX_APPWINDOW;
+        DWORD exstyle = WS_EX_APPWINDOW | WS_EX_TOPMOST;
         RECT  r       = { 0, 0, GUI_BASE_W, GUI_BASE_H };
         AdjustWindowRectEx(&r, style, FALSE, exstyle);
         int ww = r.right - r.left, wh = r.bottom - r.top;
@@ -1049,7 +1049,7 @@ bool gui_show(clap_nr_gui_t *gui)
     else                     ShowWindow(gui->hwnd, SW_SHOW);
 
     if (!gui->embedded) {
-        SetWindowPos(gui->hwnd, HWND_TOP, 0, 0, 0, 0,
+        SetWindowPos(gui->hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         SetForegroundWindow(gui->hwnd);
     }

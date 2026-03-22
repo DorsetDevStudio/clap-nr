@@ -10,31 +10,32 @@ set LIBS=%~dp0libs
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo ERROR: Run as Administrator.
+    pause
     exit /b 1
 )
 
 if not exist "%DEST%" mkdir "%DEST%"
 
-call :copy "%BUILD%\clap-nr.clap"            "%DEST%\" || exit /b %errorlevel%
-call :copy "%LIBS%\fftw\libfftw3-3.dll"      "%DEST%\" || exit /b %errorlevel%
-call :copy "%LIBS%\fftw\libfftw3f-3.dll"     "%DEST%\" || exit /b %errorlevel%
-call :copy "%LIBS%\rnnoise\rnnoise.dll"       "%DEST%\" || exit /b %errorlevel%
-call :copy "%LIBS%\rnnoise\rnnoise_avx2.dll"  "%DEST%\" || exit /b %errorlevel%
-call :copy "%LIBS%\specbleach\specbleach.dll"  "%DEST%\" || exit /b %errorlevel%
+call :copy "%BUILD%"           clap-nr.clap    || goto :fail
+call :copy "%LIBS%\fftw"      libfftw3-3.dll  || goto :fail
+call :copy "%LIBS%\fftw"      libfftw3f-3.dll || goto :fail
+call :copy "%LIBS%\rnnoise"   rnnoise.dll     || goto :fail
+call :copy "%LIBS%\rnnoise"   rnnoise_avx2.dll || goto :fail
+call :copy "%LIBS%\specbleach" specbleach.dll  || goto :fail
 
 echo Plugin successfully installed to %DEST%, you can now test in your host app.
 pause
 exit /b 0
 
+:fail
+pause
+exit /b 1
+
 :: -----------------------------------------------------------------------
 :copy
-xcopy /y %1 %2 >nul 2>&1
-if %errorlevel% == 32 (
-    echo ERROR: %~1 is locked. Close your CLAP host and run again.
-    exit /b 32
-)
-if %errorlevel% neq 0 (
-    echo ERROR: failed to copy %~1
+robocopy "%~1" "%DEST%" %2 /copy:dat /njh /njs /np >nul 2>&1
+if %errorlevel% geq 8 (
+    echo ERROR: failed to copy %2 -- if your CLAP host is open, close it and try again.
     exit /b 1
 )
 exit /b 0

@@ -8,6 +8,7 @@ set DEST=%CommonProgramFiles%\CLAP
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo ERROR: Run as Administrator.
+    pause
     exit /b 1
 )
 
@@ -25,13 +26,10 @@ exit /b 0
 :: -----------------------------------------------------------------------
 :del
 if not exist %1 exit /b 0
-del /f %1 >nul 2>&1
-if %errorlevel% == 32 (
-    echo ERROR: %~1 is locked. Close your CLAP host and run again.
-    exit /b 32
-)
+del /f /q %1 >nul 2>&1
 if %errorlevel% neq 0 (
-    echo ERROR: failed to delete %~1
+    echo ERROR: failed to delete %~nx1 - if your CLAP host is open, close it and try again.
+    pause
     exit /b 1
 )
 exit /b 0

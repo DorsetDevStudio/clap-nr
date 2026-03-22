@@ -300,8 +300,14 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
         if (self->emnr[ch]) self->emnr[ch]->run = (new_mode == 2) ? 1 : 0;
         if (self->rnnr[ch]) self->rnnr[ch]->run = (new_mode == 3) ? 1 : 0;
         if (self->sbnr[ch]) self->sbnr[ch]->run = (new_mode == 4) ? 1 : 0;
-        if (entering_nr2 && self->emnr[ch])
+        if (entering_nr2 && self->emnr[ch]) {
             reset_emnr_for_nr2_entry(self->emnr[ch]);
+            /* Also reset the wrapper ring state so the EMNR ring buffer
+             * in plugin_process starts clean when switching back to NR2. */
+            self->emnr_in_count[ch]  = 0;
+            self->emnr_out_head[ch]  = 0;
+            self->emnr_out_avail[ch] = 0;
+        }
     }
     nr_log("apply_nr_mode: mode=%d  emnr[0].run=%d emnr[1].run=%d  reset=%d",
            new_mode,
@@ -741,14 +747,19 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 self->anr[ch]->buff_size = (int)n;
                 xanr(self->anr[ch], 0);
             }
-            if (self->emnr[ch]) {
+            if (self->emnr[ch] && self->emnr[ch]->run) {
                 /* Push n real samples into the EMNR input ring, call xemnr
                  * in EMNR_BSIZE=1024 strides, collect output into a flat
                  * real output queue, then pop n samples back into buf[ch].
                  *
                  * EMNR has STFT latency (~3072 samples at fsize=4096/ovrlp=4
                  * = 64 ms at 48 kHz).  While the output queue has not yet
-                 * filled we output silence, which is correct latency behaviour. */
+                 * filled we output silence, which is correct latency behaviour.
+                 *
+                 * The run guard above is CRITICAL: without it this block reads
+                 * from buf[ch] into inbuf and writes zeros back to buf[ch]
+                 * (out_avail stays 0 until 1024 samples are staged), silencing
+                 * the buffer before any other NR mode gets to process it. */
                 EMNR em = self->emnr[ch];
                 double *inbuf  = self->emnr_inbuf[ch];
                 double *outbuf = self->emnr_outbuf[ch];

@@ -65,8 +65,8 @@ typedef struct _sbnr
         int buffer_size;
         int rate;
 
-        float* input;
-        float* output;
+        float* input;         /* float conversion buffer [buffer_size floats] */
+        float* output;        /* float conversion buffer [buffer_size floats] */
 } sbnr, *SBNR;
 
 // define the public api of this module

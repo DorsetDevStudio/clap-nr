@@ -50,11 +50,15 @@ https://github.com/lucianodato/libspecbleach
 
 void setSize_sbnr (SBNR a, int size)
 {
+    if (size == a->buffer_size) return;
+    a->buffer_size = size;
+    specbleach_adaptive_free(a->st);
+    float frame_ms = (float)size * 1000.0f / (float)a->rate;
+    a->st = specbleach_adaptive_initialize((uint32_t)a->rate, frame_ms);
     _aligned_free(a->input);
     _aligned_free(a->output);
-    a->input = malloc0(size * sizeof(float));
+    a->input  = malloc0(size * sizeof(float));
     a->output = malloc0(size * sizeof(float));
-    a->buffer_size = size;
 }
 
 void setBuffers_sbnr (SBNR a, double* in, double* out)
@@ -70,7 +74,6 @@ SBNR create_sbnr (int run, int position, int size, double *in, double *out, int 
     a->run = run;
     a->position = position;
     a->rate = rate;
-    a->st = specbleach_adaptive_initialize(a->rate, 20); //20ms frame size, documentation recommends 20-100
     a->in = in;
     a->out = out;
     a->reduction_amount = 10.F;
@@ -78,10 +81,12 @@ SBNR create_sbnr (int run, int position, int size, double *in, double *out, int 
     a->whitening_factor = 0.F;
     a->noise_scaling_type = 0;
     a->noise_rescale = 2.F;
-    a->post_filter_threshold = -10.F;
+    a->post_filter_threshold = 0.F;  /* 0 = neutral; -10 over-activates the post-filter */
     a->buffer_size = size;
-    a->input = malloc0(a->buffer_size * sizeof(float));
-    a->output = malloc0(a->buffer_size * sizeof(float));
+    float frame_ms = (float)size * 1000.0f / (float)rate;
+    a->st     = specbleach_adaptive_initialize((uint32_t)rate, frame_ms);
+    a->input  = malloc0(size * sizeof(float));
+    a->output = malloc0(size * sizeof(float));
 
     return a;
 }
@@ -90,7 +95,12 @@ void setSamplerate_sbnr(SBNR a, int rate)
 {
     specbleach_adaptive_free(a->st);
     a->rate = rate;
-    a->st = specbleach_adaptive_initialize(a->rate, 20); //20ms frame size, documentation recommends 20-100
+    float frame_ms = (float)a->buffer_size * 1000.0f / (float)rate;
+    a->st = specbleach_adaptive_initialize((uint32_t)rate, frame_ms);
+    _aligned_free(a->input);
+    _aligned_free(a->output);
+    a->input  = malloc0(a->buffer_size * sizeof(float));
+    a->output = malloc0(a->buffer_size * sizeof(float));
 }
 
 void xsbnr (SBNR a, int pos)
@@ -108,21 +118,18 @@ void xsbnr (SBNR a, int pos)
 
         specbleach_adaptive_load_parameters(a->st, parameters);
 
-        double*  in = a->in;
-        double* out = a->out;
-        int      bs = a->buffer_size;
-        float* proc_out = a->output;
-        float*  to_proc = a->input;
+        double *in  = a->in;
+        double *out = a->out;
+        int     bs  = a->buffer_size;
 
-        for (size_t i = 0; i < bs; i++)
-        {
-            to_proc[i] = (float)in[2 * i + 0];
-        }
-        specbleach_adaptive_process(a->st, (uint32_t)bs, to_proc, proc_out);
+        for (int i = 0; i < bs; i++)
+            a->input[i] = (float)in[2 * i];
 
-        for (size_t i = 0; i < bs; i++)
+        specbleach_adaptive_process(a->st, (uint32_t)bs, a->input, a->output);
+
+        for (int i = 0; i < bs; i++)
         {
-            out[2 * i + 0] = (double) proc_out[i];
+            out[2 * i]     = (double)a->output[i];
             out[2 * i + 1] = 0.0;
         }
     }
@@ -135,9 +142,9 @@ void xsbnr (SBNR a, int pos)
 void destroy_sbnr (SBNR a)
 {
     specbleach_adaptive_free(a->st);
-    _aligned_free (a->input);
-    _aligned_free (a->output);
-    _aligned_free (a);
+    _aligned_free(a->input);
+    _aligned_free(a->output);
+    _aligned_free(a);
 }
 
 #ifndef CLAP_NR_STANDALONE

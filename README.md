@@ -224,29 +224,29 @@ application first, then run the script again.
 
 ```
 clap-nr/
-├── CMakeLists.txt
-├── LICENSE                  <- GNU GPL v2
-├── THIRD-PARTY-NOTICES.md   <- upstream copyright notices
-├── README.md
-├── include/
-│   └── clap/                <- CLAP SDK headers (vendored, MIT licence)
-├── libs/
-│   ├── fftw/                <- fftw3.h + .dll/.lib
-│   ├── rnnoise/             <- rnnoise.h + .dll/.lib + weights
-│   └── specbleach/          <- specbleach_*.h + .dll/.lib
-└── src/
-    ├── clap_nr.c            <- CLAP plugin entry point and audio processing
-    ├── gui_win32.c          <- Win32 parameter UI
-    ├── gui.h
-    └── nr/                  <- DSP noise-reduction algorithm sources
-        ├── anr.c/h          (NR1 - Adaptive LMS)
-        ├── emnr.c/h         (NR2 - Spectral MMSE / ML)
-        ├── rnnr.c/h         (NR3 - RNNoise neural net)
-        ├── sbnr.c/h         (NR4 - libspecbleach)
-        ├── calculus.c/h     <- lookup tables for EMNR
-        ├── zetaHat.c/h
-        ├── FDnoiseIQ.c/h
-        └── comm.h
+├-- CMakeLists.txt
+├-- LICENSE                  <- GNU GPL v2
+├-- THIRD-PARTY-NOTICES.md   <- upstream copyright notices
+├-- README.md
+├-- include/
+│   └-- clap/                <- CLAP SDK headers (vendored, MIT licence)
+├-- libs/
+│   ├-- fftw/                <- fftw3.h + .dll/.lib
+│   ├-- rnnoise/             <- rnnoise.h + .dll/.lib + weights
+│   └-- specbleach/          <- specbleach_*.h + .dll/.lib
+└-- src/
+    ├-- clap_nr.c            <- CLAP plugin entry point and audio processing
+    ├-- gui_win32.c          <- Win32 parameter UI
+    ├-- gui.h
+    └-- nr/                  <- DSP noise-reduction algorithm sources
+        ├-- anr.c/h          (NR1 - Adaptive LMS)
+        ├-- emnr.c/h         (NR2 - Spectral MMSE / ML)
+        ├-- rnnr.c/h         (NR3 - RNNoise neural net)
+        ├-- sbnr.c/h         (NR4 - libspecbleach)
+        ├-- calculus.c/h     <- lookup tables for EMNR
+        ├-- zetaHat.c/h
+        ├-- FDnoiseIQ.c/h
+        └-- comm.h
 ```
 
 ---

@@ -63,6 +63,14 @@ void           gui_destroy(clap_nr_gui_t *gui);
  * window->api == CLAP_WINDOW_API_WIN32 on Windows. */
 bool     gui_set_parent(clap_nr_gui_t *gui, const clap_window_t *window);
 
+/* Set the floating window's owner so it minimises/restores with the host
+ * and stays above it.  Call before or after gui_show(). */
+bool     gui_set_transient(clap_nr_gui_t *gui, const clap_window_t *window);
+
+/* Accept a suggested title from the host (may include host name + version).
+ * If the GUI window is already visible, the title bar is updated immediately. */
+void     gui_suggest_title(clap_nr_gui_t *gui, const char *title);
+
 /* Return the preferred (fixed) size in pixels. */
 void     gui_get_size(clap_nr_gui_t *gui, uint32_t *out_w, uint32_t *out_h);
 

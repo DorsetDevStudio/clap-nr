@@ -201,7 +201,7 @@ typedef struct {
     /* True between a successful activate() and the subsequent deactivate().
      * process() checks this flag and does passthrough if false, guarding
      * against hosts that call process() outside the active_state window. */
-    bool active;
+    volatile bool active;
 
     /* Incremented by process() on entry, decremented on exit.  deactivate()
      * spins on this reaching zero before returning, guaranteeing that
@@ -492,14 +492,43 @@ static void plugin_destroy(const clap_plugin_t *p)
      * which would cause FFTW to call abort() and kill the host process.
      * When deactivate() was already called this drain returns instantly. */
     self->active = false;
+
+    /* Drain with timeout.  If the audio thread is stuck (e.g. an exception
+     * escaped process() and was swallowed by the host callback frame without
+     * decrementing process_depth), spinning forever would block the host's
+     * shutdown watchdog.  After 2 s we give up and leak the DSP objects rather
+     * than calling fftw_destroy_plan() concurrently with fftw_execute(). */
 #ifdef _WIN32
     MemoryBarrier();
-    while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
-        Sleep(0);
+    {
+        int budget = 2000;
+        while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0) {
+            Sleep(1);
+            if (--budget <= 0) {
+                nr_log("plugin_destroy: timed out waiting for audio thread -- "
+                       "leaking DSP objects to avoid FFTW abort()");
+                if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
+                free(self);
+                return;
+            }
+        }
+    }
 #else
     atomic_thread_fence(memory_order_seq_cst);
-    while (atomic_load(&self->process_depth) != 0)
-        sched_yield();
+    {
+        int budget = 2000;
+        while (atomic_load(&self->process_depth) != 0) {
+            struct timespec ts = { 0, 1000000L }; /* 1 ms */
+            nanosleep(&ts, NULL);
+            if (--budget <= 0) {
+                nr_log("plugin_destroy: timed out waiting for audio thread -- "
+                       "leaking DSP objects to avoid crash");
+                if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
+                free(self);
+                return;
+            }
+        }
+    }
 #endif
 
     if (self->gui) { gui_destroy(self->gui); self->gui = NULL; }
@@ -740,18 +769,47 @@ static void plugin_deactivate(const clap_plugin_t *p)
      * By waiting here for process_depth to hit zero we guarantee that no
      * process() call is in flight before control returns to the host.  The
      * wait is bounded by one audio buffer (typically 1-10 ms) so it does
-     * not block the UI perceptibly. */
+     * not block the UI perceptibly.
+     *
+     * Sleep(1) is used rather than Sleep(0): Sleep(0) only yields to threads
+     * of equal or higher priority.  Because audio threads typically run at
+     * THREAD_PRIORITY_TIME_CRITICAL (above the main thread), Sleep(0) from
+     * the main thread will not yield to the audio thread, turning the spin
+     * into a busy-wait that delays the audio thread completing its buffer
+     * and decrementing process_depth.  Sleep(1) explicitly yields for one
+     * scheduler timeslice, allowing the audio thread to run. */
 #ifdef _WIN32
+    MemoryBarrier();
     while (InterlockedCompareExchange(&self->process_depth, 0, 0) != 0)
-        Sleep(0);
+        Sleep(1);
 #else
+    atomic_thread_fence(memory_order_seq_cst);
     while (atomic_load(&self->process_depth) != 0)
         sched_yield();
 #endif
 }
 
-static bool plugin_start_processing(const clap_plugin_t *p) { (void)p; return true; }
-static void plugin_stop_processing (const clap_plugin_t *p) { (void)p; }
+static bool plugin_start_processing(const clap_plugin_t *p)
+{
+    clap_nr_t *self = (clap_nr_t *)p;
+    /* Re-enable DSP after a stop/start cycle.  Activate() set this to true
+     * initially; stop_processing() cleared it; we restore it here so that
+     * process() does real work again rather than passing audio through. */
+    self->active = true;
+    return true;
+}
+
+static void plugin_stop_processing(const clap_plugin_t *p)
+{
+    clap_nr_t *self = (clap_nr_t *)p;
+    /* Called on the audio thread after the last process() call in this
+     * processing session.  Clearing active means any process() call that
+     * a non-compliant host fires between here and deactivate() will
+     * passthrough without touching FFTW, RNNoise, or specbleach.  The
+     * deactivate() drain-spin will then exit immediately (depth is already
+     * 0 because this is called after the last process() returned). */
+    self->active = false;
+}
 
 static void plugin_reset(const clap_plugin_t *p)
 {
@@ -844,8 +902,11 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
             /* Model loading is file I/O -- must not happen on the audio thread.
              * Request a main-thread callback; plugin_on_main_thread will call
              * apply_nr3_model() there.  Keep nr3_model_dirty set so the callback
-             * handler knows work is pending. */
-            self->host->request_callback(self->host);
+             * handler knows work is pending.
+             * Guard with active: if deactivate/stop_processing already cleared
+             * the flag, calling back into the host during teardown can crash. */
+            if (self->active)
+                self->host->request_callback(self->host);
         }
         self->params_dirty = false;
     }
@@ -884,6 +945,20 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     uint32_t proc_ch = (in_ch < out_ch) ? in_ch : out_ch;
     if (proc_ch > 2) proc_ch = 2;
 
+    /* Guard the entire per-channel DSP block with SEH (Windows only).
+     * If any NR algorithm (fftw_execute, rnnoise_process_frame, xsbnr, ...)
+     * throws a structured exception:
+     *   - The __except handler disables NR and passthroughs the audio so the
+     *     host stream is not silenced.
+     *   - Execution falls through to the InterlockedDecrement BELOW the block,
+     *     which is what was missing when the original SEH was removed during
+     *     the cross-platform port.  Without this, any exception escaping
+     *     process() leaves process_depth permanently stuck at 1, causing
+     *     deactivate()/destroy() to spin forever until the host watchdog kills
+     *     the process. */
+#ifdef _WIN32
+    __try {
+#endif
     for (uint32_t ch = 0; ch < proc_ch; ++ch) {
         float *src = in_buf->data32[ch];
         float *dst = out_buf->data32[ch];
@@ -1028,6 +1103,24 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 dst[i] = (float)self->buf[ch][2 * i];
         }
     }
+#ifdef _WIN32
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        nr_log("process: SEH 0x%08lX escaped DSP -- disabling NR, passthroughing",
+               (unsigned long)GetExceptionCode());
+        self->nr_mode    = 0;
+        self->params_dirty = true;
+        /* Overwrite any partial DSP output with clean passthrough audio. */
+        if (proc->audio_inputs_count > 0 && proc->audio_outputs_count > 0) {
+            const clap_audio_buffer_t *ib2 = &proc->audio_inputs[0];
+            const clap_audio_buffer_t *ob2 = &proc->audio_outputs[0];
+            uint32_t cc = (ib2->channel_count < ob2->channel_count)
+                         ? ib2->channel_count : ob2->channel_count;
+            for (uint32_t c = 0; c < cc; ++c)
+                if (ib2->data32[c] && ob2->data32[c])
+                    memcpy(ob2->data32[c], ib2->data32[c], n * sizeof(float));
+        }
+    }
+#endif
 
 #ifdef _WIN32
     InterlockedDecrement(&self->process_depth);
@@ -1353,9 +1446,18 @@ static const clap_plugin_state_t s_state = {
  * --------------------------------------------------------------------- */
 static bool gui_is_api_supported(const clap_plugin_t *p, const char *api, bool is_floating)
 {
-    (void)p; (void)is_floating;
+    (void)p;
 #ifdef _WIN32
-    return strcmp(api, CLAP_WINDOW_API_WIN32) == 0;
+    /* Embedded (WS_CHILD) only.  Returning false for floating causes hosts
+     * that probe floating first to fall back to embedded mode, where they
+     * create a native parent window (e.g. a QDialog with transientParent
+     * set to the host's main window), embed our WS_CHILD window into it,
+     * and manage the title and window-manager relationship themselves.  That
+     * parent relationship is what makes our window minimise with the host
+     * and inherit the host's title prefix (e.g. "Station Master Pro | ").
+     * A plugin-owned floating window has no owner HWND, so Windows never
+     * minimises it in response to the host minimising. */
+    return strcmp(api, CLAP_WINDOW_API_WIN32) == 0 && !is_floating;
 #else
     return false;
 #endif
@@ -1366,6 +1468,12 @@ static bool gui_get_preferred_api(const clap_plugin_t *p, const char **api, bool
     (void)p;
 #ifdef _WIN32
     *api = CLAP_WINDOW_API_WIN32;
+    /* Prefer embedded.  The host creates a native window (e.g. QDialog)
+     * with its main window as the OS owner/parent, embeds our WS_CHILD
+     * control into it, and sets the title itself.  That gives us
+     * minimize-with-host and the host's own title prefix for free.
+     * is_api_supported returns false for floating so hosts that probe
+     * floating first skip it and land here. */
     *is_floating = false;
     return true;
 #elif defined(__linux__)
@@ -1466,14 +1574,18 @@ static bool gui_plugin_set_parent(const clap_plugin_t *p, const clap_window_t *w
     return gui_set_parent(self->gui, window);
 }
 
-static bool gui_set_transient(const clap_plugin_t *p, const clap_window_t *w)
+static bool gui_plugin_set_transient(const clap_plugin_t *p, const clap_window_t *w)
 {
-    (void)p; (void)w; return false;
+    clap_nr_t *self = (clap_nr_t *)p;
+    if (!self->gui) return false;
+    return gui_set_transient(self->gui, w);
 }
 
-static void gui_suggest_title(const clap_plugin_t *p, const char *title)
+static void gui_plugin_suggest_title(const clap_plugin_t *p, const char *title)
 {
-    (void)p; (void)title;
+    clap_nr_t *self = (clap_nr_t *)p;
+    if (!self->gui) return;
+    gui_suggest_title(self->gui, title);
 }
 
 static bool gui_plugin_show(const clap_plugin_t *p)
@@ -1511,8 +1623,8 @@ static const clap_plugin_gui_t s_gui = {
     .adjust_size       = gui_adjust_size,
     .set_size          = gui_set_size,
     .set_parent        = gui_plugin_set_parent,
-    .set_transient     = gui_set_transient,
-    .suggest_title     = gui_suggest_title,
+    .set_transient     = gui_plugin_set_transient,
+    .suggest_title     = gui_plugin_suggest_title,
     .show              = gui_plugin_show,
     .hide              = gui_plugin_hide,
 };

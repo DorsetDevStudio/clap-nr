@@ -202,8 +202,16 @@ struct clap_nr_gui_s {
     int    min_w;
     int    min_h;
 
-    /* Floating window title constructed at create time */
+    /* Floating window title constructed at create time; may be overridden
+     * later by the host via gui_suggest_title(). */
     char   window_title[256];
+
+#ifdef _WIN32
+    /* Owner window: set via gui_set_transient() so the floating window
+     * minimises/restores with the host application and stays above it.
+     * nullptr until the host calls set_transient. */
+    HWND   owner_hwnd;
+#endif
 };
 
 /* -----------------------------------------------------------------------
@@ -707,6 +715,33 @@ static void render_frame(clap_nr_gui_s *g)
 }
 
 /* -----------------------------------------------------------------------
+ * Win32 cleanup helper  (Windows only)
+ *
+ * Idempotent: safe to call from WM_DESTROY (fired when the host destroys
+ * its parent window before calling CLAP gui.destroy()) OR from gui_destroy
+ * (normal CLAP lifecycle).  Guards on d3d_device ensure the D3D11/ImGui
+ * teardown only runs once even if called from both paths.
+ * NOTE: Does NOT call DestroyWindow - callers handle that themselves.
+ * --------------------------------------------------------------------- */
+#ifdef _WIN32
+static void gui_win32_cleanup(clap_nr_gui_s *g)
+{
+    if (!g) return;
+    if (g->timer_id) {
+        if (g->hwnd) KillTimer(g->hwnd, g->timer_id);
+        g->timer_id = 0;
+    }
+    /* d3d_device is non-null iff D3D11 + ImGui were fully initialised */
+    if (g->d3d_device) {
+        ImGui_ImplDX11_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        d3d_destroy(g);   /* releases all COM refs and sets pointers to nullptr */
+    }
+}
+#endif
+
+/* -----------------------------------------------------------------------
  * Window procedure + class registration  (Windows only)
  * --------------------------------------------------------------------- */
 #ifdef _WIN32
@@ -714,7 +749,17 @@ static void render_frame(clap_nr_gui_s *g)
 
 static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
+    /* Guard: ImGui_ImplWin32_WndProcHandler dereferences the ImGui context
+     * (calls ImGui::GetIO() which reads GImGui).  If gui_win32_cleanup() has
+     * already called ImGui::DestroyContext(), GImGui is null and calling
+     * ImGui_ImplWin32_WndProcHandler would immediately crash.  This happens
+     * in the normal teardown path: gui_win32_cleanup() destroys the context,
+     * then gui_destroy() calls DestroyWindow(), which synchronously fires
+     * WM_DESTROY (and WM_NCDESTROY, WM_SIZE, WM_NCPAINT, ...) back through
+     * this WndProc.  Skipping the handler when the context is gone is safe
+     * because ImGui no longer needs to process input at that point. */
+    if (ImGui::GetCurrentContext() &&
+        ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
         return 1;
 
     clap_nr_gui_s *g = (clap_nr_gui_s *)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
@@ -733,14 +778,30 @@ static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_TIMER:
-        if (g) render_frame(g);
+        if (g && g->d3d_device) render_frame(g);
         return 0;
     case WM_PAINT:
-        if (g) render_frame(g);
+        if (g && g->d3d_device) render_frame(g);
         ValidateRect(hwnd, nullptr);
         return 0;
     case WM_DESTROY:
-        if (g) g->hwnd = nullptr;
+        /* Full cleanup here handles the case where the host destroys its
+         * parent window before calling CLAP plugin.gui.destroy().  Without
+         * this, the D3D11 swap chain would remain alive pointing at a dead
+         * HWND, and any subsequent Present() call (e.g. from a queued
+         * WM_TIMER) would crash inside DXGI. */
+        if (g) {
+            gui_win32_cleanup(g);
+            g->hwnd = nullptr;
+        }
+        return 0;
+    case WM_NCDESTROY:
+        /* Last message delivered to this window.  Clear GWLP_USERDATA so
+         * any stray message that arrives after WM_NCDESTROY (e.g. from a
+         * hooked message pump in the host) cannot dereference a freed 'g'
+         * pointer.  SetWindowLongPtrA is safe here because the window still
+         * exists as an object even though it is no longer visible. */
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, 0);
         return 0;
     case WM_SETICON:
     case WM_SETTEXT:
@@ -969,14 +1030,18 @@ void gui_destroy(clap_nr_gui_t *gui)
 {
     if (!gui) return;
 #ifdef _WIN32
-    if (gui->hwnd) {
-        if (gui->timer_id) KillTimer(gui->hwnd, gui->timer_id);
-        ImGui_ImplDX11_Shutdown();
-        ImGui_ImplWin32_Shutdown();
-        ImGui::DestroyContext();
-        d3d_destroy(gui);
-        DestroyWindow(gui->hwnd);
-        gui->hwnd = nullptr;
+    {
+        /* gui_win32_cleanup is idempotent: if WM_DESTROY already ran (because
+         * the host destroyed the parent window before calling CLAP gui.destroy)
+         * this is a safe no-op.  Otherwise it does the full D3D11/ImGui teardown
+         * before we call DestroyWindow so there are no live COM references on
+         * a window that is about to be invalidated. */
+        HWND h = gui->hwnd;
+        gui_win32_cleanup(gui);
+        if (h) {
+            DestroyWindow(h);
+            gui->hwnd = nullptr;
+        }
     }
 #else
     if (gui->glfw_win) {
@@ -985,6 +1050,42 @@ void gui_destroy(clap_nr_gui_t *gui)
     }
 #endif
     free(gui);
+}
+
+bool gui_set_transient(clap_nr_gui_t *gui, const clap_window_t *window)
+{
+    if (!gui || !window) return false;
+#ifdef _WIN32
+    /* Store the host's top-level HWND so gui_show() can pass it as the
+     * owner window when creating the floating window via CreateWindowExA.
+     * The owner relationship is established at window creation time only --
+     * dynamically changing the owner of an existing top-level window via
+     * SetWindowLongPtr(GWLP_HWNDPARENT) is not well-defined (per Raymond
+     * Chen / MSDN) and can cause synchronous message dispatching that
+     * re-enters host code while we are inside this callback, leading to
+     * crashes.  If the window already exists (non-standard host call order),
+     * just update the stored HWND; the change takes effect on the next
+     * gui_show() → CreateWindowExA call. */
+    gui->owner_hwnd = (HWND)window->win32;
+    return true;
+#else
+    (void)window;
+    return false;
+#endif
+}
+
+void gui_suggest_title(clap_nr_gui_t *gui, const char *title)
+{
+    if (!gui || !title || !title[0]) return;
+    /* The host may call this at any time to set a more descriptive title
+     * (e.g. "StationMasterPro 2.1 | CLAP NR" including version numbers).
+     * We update our stored title and, if the window already exists,
+     * push the new text straight to the title bar. */
+    snprintf(gui->window_title, sizeof(gui->window_title), "%s", title);
+#ifdef _WIN32
+    if (gui->hwnd)
+        SetWindowTextA(gui->hwnd, gui->window_title);
+#endif
 }
 
 bool gui_set_parent(clap_nr_gui_t *gui, const clap_window_t *window)
@@ -1022,12 +1123,20 @@ bool gui_show(clap_nr_gui_t *gui)
 
 #ifdef _WIN32
     if (!gui->hwnd) {
-        /* Floating window */
+        /* Floating window.
+         * Pass owner_hwnd (set by gui_set_transient) as the hWndParent
+         * argument to CreateWindowEx.  For a WS_OVERLAPPED top-level window
+         * Win32 treats a non-null hWndParent as the OWNER, not the parent:
+         *   - The floating window always renders above the owner.
+         *   - It minimises and restores together with the owner.
+         *   - It does NOT get its own independent taskbar button.
+         * WS_EX_APPWINDOW is intentionally omitted: that flag overrides the
+         * owner relationship and forces an independent taskbar entry. */
         gui->embedded = false;
         POINT pt = { 200, 200 };
         GetCursorPos(&pt);
         DWORD style   = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
-        DWORD exstyle = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+        DWORD exstyle = WS_EX_TOPMOST;
         RECT  r       = { 0, 0, GUI_BASE_W, GUI_BASE_H };
         AdjustWindowRectEx(&r, style, FALSE, exstyle);
         int ww = r.right - r.left, wh = r.bottom - r.top;
@@ -1041,7 +1150,7 @@ bool gui_show(clap_nr_gui_t *gui)
             if (wx < mi.rcWork.left)        wx = mi.rcWork.left;
             if (wy < mi.rcWork.top)         wy = mi.rcWork.top;
         }
-        if (!create_window_and_imgui(gui, nullptr, wx, wy, ww, wh, style, exstyle))
+        if (!create_window_and_imgui(gui, gui->owner_hwnd, wx, wy, ww, wh, style, exstyle))
             return false;
     }
 

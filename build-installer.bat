@@ -26,7 +26,11 @@ setlocal enabledelayedexpansion
 
 set "PF86=%ProgramFiles(x86)%"
 
-set VERSION=1.0.4
+:: Read version from src/version.h - single source of truth
+for /f "tokens=3" %%a in ('findstr /c:"#define CLAP_NR_VERSION_MAJOR" "%~dp0src\version.h"') do set VER_MAJOR=%%a
+for /f "tokens=3" %%a in ('findstr /c:"#define CLAP_NR_VERSION_MINOR" "%~dp0src\version.h"') do set VER_MINOR=%%a
+for /f "tokens=3" %%a in ('findstr /c:"#define CLAP_NR_VERSION_PATCH" "%~dp0src\version.h"') do set VER_PATCH=%%a
+set VERSION=%VER_MAJOR%.%VER_MINOR%.%VER_PATCH%
 set SCRIPT=%~dp0installer.iss
 set BUILD_DIR=%~dp0build
 set OUTPUT_DIR=%~dp0dist
@@ -137,7 +141,7 @@ echo  Compiling installer...
 echo -----------------------------------------------------------------------
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
-"%ISCC%" /O"%OUTPUT_DIR%" /F"clap-nr-%VERSION%-setup" "%SCRIPT%"
+"%ISCC%" /DAppVersion=%VERSION% /O"%OUTPUT_DIR%" /F"clap-nr-%VERSION%-setup" "%SCRIPT%"
 if %errorlevel% neq 0 (
     echo.
     echo ERROR: Inno Setup compilation failed.

@@ -98,6 +98,10 @@ void     gui_set_param(clap_nr_gui_t *gui, clap_id param_id, double value);
 /* Push the persisted tooltips_on state into the GUI (plugin -> GUI). */
 void     gui_set_tooltips(clap_nr_gui_t *gui, bool on);
 
+/* Update the active notch count display.  Called from the audio thread;
+ * sets a single volatile int (no explicit synchronisation needed for display). */
+void     gui_set_nr0_active_notches(clap_nr_gui_t *gui, int count);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

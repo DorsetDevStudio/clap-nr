@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Read version numbers from the single source of truth: src/version.h
+file(READ "${CMAKE_SOURCE_DIR}/src/version.h" _ver_header)
+string(REGEX MATCH "CLAP_NR_VERSION_MAJOR[ \t]+([0-9]+)" _ ${_ver_header})
+set(CLAP_NR_MAJOR ${CMAKE_MATCH_1})
+string(REGEX MATCH "CLAP_NR_VERSION_MINOR[ \t]+([0-9]+)" _ ${_ver_header})
+set(CLAP_NR_MINOR ${CMAKE_MATCH_1})
+string(REGEX MATCH "CLAP_NR_VERSION_PATCH[ \t]+([0-9]+)" _ ${_ver_header})
+set(CLAP_NR_PATCH ${CMAKE_MATCH_1})
+
 project(clap-nr
-    VERSION 1.0.0
+    VERSION ${CLAP_NR_MAJOR}.${CLAP_NR_MINOR}.${CLAP_NR_PATCH}
     LANGUAGES C CXX
 )
 
@@ -24,6 +34,7 @@ set(NR_SOURCES
     src/nr/emnr.c
     src/nr/rnnr.c
     src/nr/sbnr.c
+    src/nr/nr0.c
     src/nr/calculus.c
     src/nr/zetaHat.c
     src/nr/FDnoiseIQ.c

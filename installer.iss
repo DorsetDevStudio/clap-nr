@@ -12,7 +12,11 @@
 ; --------------------------------------------------------------------------
 
 #define AppName      "clap-nr"
-#define AppVersion   "1.0.4"
+; AppVersion is injected by build-installer.bat via /DAppVersion=x.y.z
+; If calling ISCC directly, pass /DAppVersion=1.2.3 on the command line.
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
 #define AppPublisher "Station Master Group Ltd"
 #define AppURL       "https://clapnr.com/"
 

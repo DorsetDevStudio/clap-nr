@@ -88,10 +88,16 @@ enum {
     _GUI_PARAM_EMNR_AE_RUN      = 8,
     _GUI_PARAM_NR3_MODEL        = 9,
     _GUI_PARAM_NR3_STRENGTH     = 10,
+    _GUI_PARAM_NR0_AGGRESSION   = 11,
+    _GUI_PARAM_NR0_MAX_NOTCHES  = 12,
+    _GUI_PARAM_NR0_THRESHOLD    = 13,
 };
 
 /* -----------------------------------------------------------------------
- * Colours / theme
+ * Colours / theme  --  Dark Amber: near-true-black + rich warm amber
+ *   COL_TEXT is warm cream (not accent) so labels/buttons have hierarchy.
+ *   Buttons sit near-black by default; ButtonHovered jumps to dark amber
+ *   glow for strong feedback; selected state = full amber + black text.
  * --------------------------------------------------------------------- */
 static const ImVec4 COL_ACCENT   = {0.36f, 0.55f, 0.93f, 1.00f}; /* blue  */
 static const ImVec4 COL_ACCENT2  = {0.24f, 0.81f, 0.56f, 1.00f}; /* green */
@@ -120,6 +126,7 @@ static void apply_theme()
     s.ChildBorderSize   = 1.0f;
     s.FrameBorderSize   = 0.0f;
 
+    /* Every alpha is 1.0 -- no bleed-through anywhere */
     ImVec4 *c = s.Colors;
     c[ImGuiCol_WindowBg]            = COL_BG;
     c[ImGuiCol_ChildBg]             = COL_SURFACE;
@@ -149,6 +156,10 @@ static void apply_theme()
     c[ImGuiCol_ScrollbarGrab]       = {0.22f, 0.24f, 0.32f, 1.00f};
     c[ImGuiCol_ScrollbarGrabHovered]= {0.30f, 0.33f, 0.44f, 1.00f};
     c[ImGuiCol_ScrollbarGrabActive] = COL_ACCENT;
+    c[ImGuiCol_ResizeGrip]          = {0.28f, 0.21f, 0.06f, 1.00f};
+    c[ImGuiCol_ResizeGripHovered]   = COL_ACCENT;
+    c[ImGuiCol_ResizeGripActive]    = {1.00f, 0.75f, 0.12f, 1.00f};
+    c[ImGuiCol_NavHighlight]        = COL_ACCENT;
 }
 
 /* -----------------------------------------------------------------------
@@ -192,6 +203,10 @@ struct clap_nr_gui_s {
     float  nr4_reduction;
     int    nr3_model;
     float  nr3_strength;
+    float  nr0_aggression;       /* 0.0-100.0 */
+    int    nr0_max_notches;      /* 1-10       */
+    float  nr0_threshold;        /* 3.0-40.0 dB above local floor */
+    volatile int nr0_active_notches; /* tones being notched (written by audio thread) */
 
     /* Per-instance ImGui context.  Each plugin instance creates its own
      * ImGuiContext so that multiple instances can coexist in the same process
@@ -223,7 +238,7 @@ struct clap_nr_gui_s {
  * Fixed logical size (pre-DPI; scaled by ImGui font/DPI internally)
  * --------------------------------------------------------------------- */
 #define GUI_BASE_W  750
-#define GUI_BASE_H  230   /* height adapts per-mode at runtime */
+#define GUI_BASE_H  300   /* height adapts per-mode at runtime */
 
 /* -----------------------------------------------------------------------
  * D3D11 helpers  (Windows only)
@@ -392,35 +407,41 @@ static void render_frame(clap_nr_gui_s *g)
     double new_val = 0.0;
 
     /* ---- Mode strip -------------------------------------------------- */
-    const char *mode_labels[] = { "NR Off", "NR 1", "NR 2", "NR 3", "NR 4" };
+    const char *mode_labels[] = { "NR Off", "NR 0", "NR 1", "NR 2", "NR 3", "NR 4" };
+    const int   mode_values[] = { 0,        5,      1,      2,      3,      4      };
 
     /* Compute minimum window width from the header row every frame.
-     * Sum: WindowPadding*2 + 5 mode buttons + spacing between them
+     * Sum: WindowPadding*2 + 6 mode buttons + spacing between them
      *    + spacing + Tips button (72) + spacing + About button (28). */
     {
         const ImGuiStyle &st = ImGui::GetStyle();
         float w = st.WindowPadding.x * 2.0f;
-        for (int i = 0; i <= 4; ++i) {
+        for (int i = 0; i <= 5; ++i) {
             w += ImGui::CalcTextSize(mode_labels[i]).x + st.FramePadding.x * 2.0f;
-            if (i < 4) w += st.ItemSpacing.x;
+            if (i < 5) w += st.ItemSpacing.x;
         }
         w += st.ItemSpacing.x + 72.0f + st.ItemSpacing.x + 28.0f;
         g->min_w = (int)ceilf(w);
     }
-    for (int i = 0; i <= 4; ++i) {
+    for (int i = 0; i <= 5; ++i) {
         if (i > 0) ImGui::SameLine();
-        bool sel = (g->nr_mode == i);
-        if (sel) ImGui::PushStyleColor(ImGuiCol_Button, COL_ACCENT);
+        bool sel = (g->nr_mode == mode_values[i]);
+        if (sel) {
+            ImGui::PushStyleColor(ImGuiCol_Button,        COL_ACCENT);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+            ImGui::PushStyleColor(ImGuiCol_Text,          {0.00f, 0.00f, 0.00f, 1.00f});
+        }
         if (ImGui::Button(mode_labels[i]) && !g->updating) {
-            if (g->nr_mode != i) {
-                g->nr_mode = i;
-                changed = true; param_id = _GUI_PARAM_NR_MODE; new_val = i;
+            if (g->nr_mode != mode_values[i]) {
+                g->nr_mode = mode_values[i];
+                changed = true; param_id = _GUI_PARAM_NR_MODE; new_val = mode_values[i];
             }
         }
-        if (sel) ImGui::PopStyleColor();
+        if (sel) ImGui::PopStyleColor(3);
         {
             const char *tt[] = {
                 "Disable noise reduction - audio passes through unchanged.",
+                "NR0: FFT spectral tone notcher. Eliminates carriers, heterodynes and whistles.",
                 "NR1: Adaptive LMS (ANR). Fast, low-latency, effective on stationary tones.",
                 "NR2: Spectral MMSE (EMNR). Broad-band noise floor reduction.",
                 "NR3: RNNoise neural-net denoiser. Good general-purpose speech denoising.",
@@ -467,6 +488,9 @@ static void render_frame(clap_nr_gui_s *g)
         ImGui::PopStyleColor();
         ImGui::Spacing();
 
+        ImGui::BulletText("NR 0  FFT spectral tone notcher. Targets specific carriers, "
+                          "heterodynes, and sweeping whistles.");
+        ImGui::Spacing();
         ImGui::BulletText("NR 1  Adaptive LMS notch filter. Fast, low-latency. Best for "
                           "carriers and tones.");
         ImGui::Spacing();
@@ -683,6 +707,121 @@ static void render_frame(clap_nr_gui_s *g)
         ImGui::PopStyleColor();
     }
 
+    /* -- NR0 (nr0) - Spectral Tone Notcher ----------------------------- */
+    if (g->nr_mode == 5) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_SURFACE);
+        ImGui::BeginChild("##nr0grp", {-1, 0}, ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY);
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+        ImGui::TextUnformatted("NR0 - Spectral Tone Notcher");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_MUTED);
+        ImGui::TextWrapped("Detects and eliminates narrowband tone interference: constant carriers, "
+                           "heterodynes, tuning tones, and sweeping whistles. "
+                           "Broadband noise and speech are unaffected.");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        /* Preset buttons: shortcuts that set aggressiveness and detection threshold */
+        ImGui::TextUnformatted("Target:"); ImGui::SameLine();
+        struct PresetDef { const char *label; float aggr; int max_notch; float thresh; const char *tip; };
+        static const PresetDef presets[] = {
+            { "Carriers / Heterodynes (default)", 2.0f, 2, 25.0f,
+              "Fixed-frequency carriers and heterodynes. Maximum 30-frame hold prevents "
+              "re-triggering on brief signal breaks. 20 dB threshold targets only the "
+              "strongest narrowband spikes. Max notches 2 avoids false triggers." },
+            { "General / Mixed", 20.0f, 4, 20.0f,
+              "Mixed interference including carriers and moderate-speed tones. "
+              "Balanced 10 dB threshold and 15-frame release." },
+            { "Whistles", 80.0f, 5, 18.0f,
+              "Fast-moving interference sweeping across the band (deliberate whistling, "
+              "hand-key artefacts). Instant release tracks rapid movement. "
+              "8 dB threshold catches weaker tones." },
+        };
+        for (int pi = 0; pi < 3; ++pi) {
+            if (pi > 0) ImGui::SameLine();
+            bool active = (fabsf(g->nr0_aggression - presets[pi].aggr) < 1.0f &&
+                           g->nr0_max_notches == presets[pi].max_notch &&
+                           fabsf(g->nr0_threshold  - presets[pi].thresh) < 0.5f);
+            if (active) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        COL_ACCENT);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+                ImGui::PushStyleColor(ImGuiCol_Text,          {0.00f, 0.00f, 0.00f, 1.00f});
+            }
+            ImGui::PushID(pi + 200);
+            if (ImGui::Button(presets[pi].label) && !g->updating) {
+                g->nr0_aggression  = presets[pi].aggr;
+                g->nr0_max_notches = presets[pi].max_notch;
+                g->nr0_threshold   = presets[pi].thresh;
+                /* Fire all three param changes directly -- no ImGui re-entrancy risk here */
+                if (g->on_param_change) {
+                    g->on_param_change(g->plugin, _GUI_PARAM_NR0_AGGRESSION,  presets[pi].aggr);
+                    g->on_param_change(g->plugin, _GUI_PARAM_NR0_MAX_NOTCHES, presets[pi].max_notch);
+                    g->on_param_change(g->plugin, _GUI_PARAM_NR0_THRESHOLD,   presets[pi].thresh);
+                }
+            }
+            ImGui::PopID();
+            if (active) ImGui::PopStyleColor(3);
+            show_tooltip_text(presets[pi].tip);
+        }
+        ImGui::Spacing();
+
+        begin_param_table("##nr0p");
+        float aggr = g->nr0_aggression;
+        if (param_slider_float("Aggressiveness",
+                "0 = most conservative (fixed carriers, slow release). "
+                "100 = most aggressive (fast whistles, instant release). "
+                "Use the preset buttons above as starting points.",
+                &aggr, 0.0f, 100.0f, "%.0f")) {
+            if (!g->updating) {
+                g->nr0_aggression = aggr;
+                changed = true; param_id = _GUI_PARAM_NR0_AGGRESSION; new_val = aggr;
+            }
+        }
+        int max_notch = g->nr0_max_notches;
+        if (param_slider_int("Max Notches",
+                "Maximum simultaneous notch bins (1-10). Reduce if speech "
+                "is accidentally notched. Default: 5.",
+                &max_notch, 1, 10)) {
+            if (!g->updating) {
+                g->nr0_max_notches = max_notch;
+                changed = true; param_id = _GUI_PARAM_NR0_MAX_NOTCHES; new_val = max_notch;
+            }
+        }
+        float thresh = g->nr0_threshold;
+        if (param_slider_float("Threshold",
+                "Detection threshold: how far a spectral peak must exceed the local noise "
+                "floor before it is notched (3-20 dB). Lower = detects weaker or obscured "
+                "tones. Higher = only notches very prominent narrowband spikes. Default: 10 dB.",
+                &thresh, 3.0f, 40.0f, "%.1f dB")) {
+            if (!g->updating) {
+                g->nr0_threshold = thresh;
+                changed = true; param_id = _GUI_PARAM_NR0_THRESHOLD; new_val = thresh;
+            }
+        }
+        ImGui::EndTable();
+
+        /* Status line and active notch counter */
+        {
+            float a      = g->nr0_aggression / 100.0f;
+            int   hold_fr = (int)(30.0f * (1.0f - a) + 0.5f);
+            int   active  = g->nr0_active_notches;
+            int   maxn    = g->nr0_max_notches;
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, COL_MUTED);
+            ImGui::Text("Release: %d frames  |  Threshold: %.1f dB above floor",
+                        hold_fr, g->nr0_threshold);
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, active > 0 ? COL_ACCENT : COL_MUTED);
+            ImGui::Text("Active notches: %d / %d", active, maxn);
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+
     /* About popup modal - avoids the re-entrancy hazard of calling MessageBoxA
      * from inside the render loop (its own message pump fires WM_TIMER). */
     ImGui::SetNextWindowPos(
@@ -696,7 +835,7 @@ static void render_frame(clap_nr_gui_s *g)
         ImGui::Text("CLAP NR  v" CLAP_NR_VERSION_STR);
 
         ImGui::PushStyleColor(ImGuiCol_Text, COL_MUTED);
-        ImGui::TextUnformatted("Algorithms: Warren Pratt NR0V / Richard Samphire MW0LGE");
+        ImGui::TextUnformatted("Algorithms: Stuart Green G5STU / Warren Pratt NR0V / Richard Samphire MW0LGE");
         ImGui::PopStyleColor();
 
         ImGui::Separator();
@@ -1097,6 +1236,9 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
     g->nr4_reduction    = 10.0f;
     g->nr3_model        = 0;
     g->nr3_strength     = 0.5f;
+    g->nr0_aggression   = 50.0f;
+    g->nr0_max_notches  = 5;
+    g->nr0_threshold    = 10.0f;
     g->tooltips_on      = true;
     g->min_w            = GUI_BASE_W;
     g->min_h            = GUI_BASE_H;
@@ -1306,6 +1448,9 @@ void gui_set_param(clap_nr_gui_t *gui, clap_id param_id, double value)
     case _GUI_PARAM_NR4_REDUCTION:    gui->nr4_reduction    = (float)value; break;
     case _GUI_PARAM_NR3_MODEL:        gui->nr3_model        = (int)value;   break;
     case _GUI_PARAM_NR3_STRENGTH:     gui->nr3_strength     = (float)value; break;
+    case _GUI_PARAM_NR0_AGGRESSION:   gui->nr0_aggression   = (float)value; break;
+    case _GUI_PARAM_NR0_MAX_NOTCHES:  gui->nr0_max_notches  = (int)value;   break;
+    case _GUI_PARAM_NR0_THRESHOLD:    gui->nr0_threshold    = (float)value; break;
     }
     gui->updating = false;
     /* No explicit redraw needed; the 60 fps timer will catch the next frame */
@@ -1315,5 +1460,11 @@ void gui_set_tooltips(clap_nr_gui_t *gui, bool on)
 {
     if (!gui) return;
     gui->tooltips_on = on;
+}
+
+void gui_set_nr0_active_notches(clap_nr_gui_t *gui, int count)
+{
+    if (!gui) return;
+    gui->nr0_active_notches = count;
 }
 

@@ -34,6 +34,7 @@ set(NR_SOURCES
     src/nr/emnr.c
     src/nr/rnnr.c
     src/nr/sbnr.c
+    src/nr/nr0.c
     src/nr/calculus.c
     src/nr/zetaHat.c
     src/nr/FDnoiseIQ.c

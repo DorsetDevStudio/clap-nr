@@ -331,9 +331,9 @@
     <h2>What is clap-nr?</h2>
 
     <div class="notice">
-      This is predominantly derivative work. The noise-reduction algorithms
-      at the core of this plugin were written by <strong>Warren Pratt (NR0V)</strong>
-      and <strong>Richard Samphire (MW0LGE)</strong>.
+      The noise-reduction algorithms at the core of this plugin were written by
+      <strong>Warren Pratt (NR0V)</strong> and <strong>Richard Samphire (MW0LGE)</strong>.
+      The NR0 automatic tone notcher was written by <strong>Stuart Green (G5STU)</strong>.
       Our contribution is the CLAP plugin wrapper, the audio integration layer,
       and the cross-platform Dear ImGui user interface. Full attribution is given in the
       <a href="https://github.com/DorsetDevStudio/clap-nr/blob/main/THIRD-PARTY-NOTICES.md">
@@ -386,6 +386,11 @@
         <h4>SBNR</h4>
         <p>libspecbleach adaptive spectral denoiser. Simple single-knob reduction control.</p>
       </div>
+      <div class="mode-card">
+        <div class="nr-label">NR0</div>
+        <h4>Auto Notch</h4>
+        <p>FFT spectral tone notcher. Automatically detects and notches narrowband carriers, heterodynes, and whistles. Written by Stuart Green (G5STU).</p>
+      </div>
     </div>
 
     <h3>NR1 parameters</h3>
@@ -431,6 +436,30 @@
       </thead>
       <tbody>
         <tr><td>Reduction</td><td>0 - 20 dB</td><td>Amount of spectral noise attenuation. Higher values suppress more noise but may affect speech clarity. Default: 10 dB.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>NR0 parameters</h3>
+    <p>Written by Stuart Green (G5STU). Uses a 2048-point overlap-add FFT to automatically detect and notch narrowband tones in real time. Broadband noise and speech are unaffected.</p>
+    <table>
+      <thead>
+        <tr><th>Parameter</th><th>Range</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Aggressiveness</td><td>0 - 100</td><td>Controls how quickly a notch is released after a tone disappears. 0 = longest hold (best for stable carriers); 100 = fastest release (best for sweeping tones).</td></tr>
+        <tr><td>Max Notches</td><td>1 - 10</td><td>Maximum number of simultaneous tone notches. Reduce for single-tone signals (e.g. carriers) to avoid touching voice content.</td></tr>
+        <tr><td>Threshold</td><td>3 - 40 dB</td><td>How far a spectral peak must exceed the local noise floor to be considered a tone. Higher values ignore weaker tones. Default: 10 dB.</td></tr>
+      </tbody>
+    </table>
+    <h4 style="margin-top:16px;">NR0 Target presets</h4>
+    <table>
+      <thead>
+        <tr><th>Preset</th><th>Aggr</th><th>Max Notches</th><th>Threshold</th><th>Use case</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Carriers / Heterodynes</td><td>0</td><td>2</td><td>20 dB</td><td>Stable single or dual tones; long hold prevents re-triggering on brief breaks.</td></tr>
+        <tr><td>General / Mixed</td><td>50</td><td>5</td><td>10 dB</td><td>Balanced detection for most interference types.</td></tr>
+        <tr><td>Whistles</td><td>80</td><td>5</td><td>8 dB</td><td>Fast release for sweeping or brief tones.</td></tr>
       </tbody>
     </table>
   </section>
@@ -562,6 +591,15 @@ bash build-linux.sh</code></pre>
         <a href="https://github.com/ocornut/imgui">github.com/ocornut/imgui</a>
       </div>
 
+      <div class="thanks-card">
+        <div>
+          <span class="name">Stuart Green</span>
+          <span class="callsign">G5STU</span>
+        </div>
+        <div class="contrib">NR0 automatic tone notcher - original FFT spectral notch algorithm for narrowband carrier, heterodyne, and whistle removal.</div>
+        <a href="https://stationmastercloud.com/">stationmastercloud.com</a>
+      </div>
+
     </div>
   </section>
 
@@ -573,8 +611,8 @@ bash build-linux.sh</code></pre>
     <a href="https://github.com/DorsetDevStudio/clap-nr">GitHub</a>
   </p>
   <p style="margin-top: 6px; font-size: 0.82rem;">
-    The noise-reduction algorithms are the work of Warren Pratt (NR0V)
-    and Richard Samphire (MW0LGE) and are reproduced here under GPL v2.
+    The NR1/NR2 algorithms are the work of Warren Pratt (NR0V) and Richard Samphire (MW0LGE),
+    reproduced under GPL v2. The NR0 automatic tone notcher was written by Stuart Green (G5STU).
   </p>
 </footer>
 

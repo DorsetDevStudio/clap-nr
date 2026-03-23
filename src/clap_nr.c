@@ -23,6 +23,7 @@
  *   2 = NR2  (EMNR - Spectral MMSE)
  *   3 = NR3  (RNNR - RNNoise neural net)
  *   4 = NR4  (SBNR - libspecbleach)        [UI disabled for now]
+ *   5 = NR0  (nr0  - Spectral Tone Notcher, FFT overlap-add)
  *
  * Extensions implemented:
  *   clap.params       - full parameter set for NR1/NR2
@@ -70,6 +71,7 @@
 #include "nr/emnr.h"
 #include "nr/rnnr.h"
 #include "nr/sbnr.h"
+#include "nr/nr0.h"
 
 /* Platform GUI */
 #include "gui.h"
@@ -95,7 +97,7 @@
  * Parameter IDs  (must stay stable - used in saved state)
  * --------------------------------------------------------------------- */
 enum {
-    PARAM_NR_MODE           = 0,  /* 0-4 stepped: Off/NR1/NR2/NR3/NR4        */
+    PARAM_NR_MODE           = 0,  /* 0-5 stepped: Off/NR1/NR2/NR3/NR4/NR0    */
     PARAM_NR4_REDUCTION     = 1,  /* 0-20 dB  (NR4 reduction amount)          */
 
     /* NR1 - Adaptive LMS (ANR) */
@@ -113,13 +115,18 @@ enum {
     PARAM_NR3_MODEL         = 9,  /* 0=Standard, 1=Small, 2=Large (stepped)   */
     PARAM_NR3_STRENGTH      = 10, /* 0.0=bypass, 1.0=full denoising           */
 
+    /* NR0 - Spectral Tone Notcher */
+    PARAM_NR0_AGGRESSION    = 11, /* 0.0-100.0 (0=conservative, 100=aggressive) */
+    PARAM_NR0_MAX_NOTCHES   = 12, /* 1-10 simultaneous notch bins              */
+    PARAM_NR0_THRESHOLD     = 13, /* 3.0-40.0 dB above local floor to notch    */
+
     PARAM_COUNT
 };
 
 /* -----------------------------------------------------------------------
  * State save/load format  (bump version when layout changes)
  * --------------------------------------------------------------------- */
-#define STATE_VERSION  4U
+#define STATE_VERSION  6U
 
 typedef struct {
     uint32_t version;
@@ -135,6 +142,9 @@ typedef struct {
     int32_t  nr3_model;       /* new in v2: 0=Standard, 1=Small, 2=Large */
     float    nr3_strength;    /* new in v3: 0.0=bypass, 1.0=full         */
     uint32_t tooltips_on;     /* new in v4: 1=tips enabled, 0=disabled   */
+    float    nr0_aggression;  /* new in v5: 0.0-100.0                    */
+    int32_t  nr0_max_notches; /* new in v5: 1-10                         */
+    float    nr0_threshold;   /* new in v6: 3.0-40.0 dB                  */
 } clap_nr_state_t;
 
 /* -----------------------------------------------------------------------
@@ -154,6 +164,7 @@ typedef struct {
     EMNR emnr[2];  /* NR2 */
     RNNR rnnr[2];  /* NR3 */
     SBNR sbnr[2];  /* NR4 */
+    NR0  nr0[2];   /* NR0 */
 
     /* Per-channel double-precision in-place buffers */
     double *buf[2];
@@ -179,6 +190,9 @@ typedef struct {
     int    emnr_ae_run;
     int    nr3_model;    /* 0=Standard (built-in), 1=Small, 2=Large */
     float  nr3_strength; /* 0.0=bypass, 1.0=full denoising           */
+    float  nr0_aggression;   /* 0.0-100.0 */
+    int    nr0_max_notches;  /* 1-10      */
+    float  nr0_threshold;    /* 3.0-40.0 dB above local floor */
 
     /* ---- RNNR direct-call staging (bypasses xrnnr's internal ring buffer
      * so that any host block size works correctly, not just chunks of
@@ -281,6 +295,20 @@ static void apply_emnr_params(clap_nr_t *self)
 }
 
 /* -----------------------------------------------------------------------
+ * Helper: apply NR0 parameter changes to the live instance
+ * --------------------------------------------------------------------- */
+static void apply_nr0_params(clap_nr_t *self)
+{
+    for (int ch = 0; ch < 2; ++ch) {
+        NR0 n0 = self->nr0[ch];
+        if (!n0) continue;
+        n0->aggression   = self->nr0_aggression;
+        n0->max_notches  = self->nr0_max_notches;
+        n0->threshold_db = self->nr0_threshold;
+    }
+}
+
+/* -----------------------------------------------------------------------
  * Helper: apply NR mode (run flags)
  * --------------------------------------------------------------------- */
 
@@ -336,12 +364,16 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
     /* Detect transition INTO NR3 before updating run flags */
     bool entering_nr3 = (new_mode == 3) &&
                         (self->rnnr[0] ? (self->rnnr[0]->run == 0) : false);
+    /* Detect transition INTO NR0 before updating run flags */
+    bool entering_nr0 = (new_mode == 5) &&
+                        (self->nr0[0] ? (self->nr0[0]->run == 0) : false);
     self->nr_mode = new_mode;
     for (int ch = 0; ch < 2; ++ch) {
         if (self->anr[ch])  self->anr[ch]->run  = (new_mode == 1) ? 1 : 0;
         if (self->emnr[ch]) self->emnr[ch]->run = (new_mode == 2) ? 1 : 0;
         if (self->rnnr[ch]) self->rnnr[ch]->run = (new_mode == 3) ? 1 : 0;
         if (self->sbnr[ch]) self->sbnr[ch]->run = (new_mode == 4) ? 1 : 0;
+        if (self->nr0[ch])  self->nr0[ch]->run  = (new_mode == 5) ? 1 : 0;
         if (entering_nr2 && self->emnr[ch]) {
             reset_emnr_for_nr2_entry(self->emnr[ch]);
             /* Also reset the wrapper ring state so the EMNR ring buffer
@@ -359,6 +391,9 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
             memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
             memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
         }
+        /* For NR0 entry, flush all OLA and history state for a clean start. */
+        if (entering_nr0 && self->nr0[ch])
+            flush_nr0(self->nr0[ch]);
     }
     nr_log("apply_nr_mode: mode=%d  emnr[0].run=%d emnr[1].run=%d  reset=%d",
            new_mode,
@@ -445,6 +480,9 @@ static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *
         self->nr3_model_dirty = true;
         break;
     case PARAM_NR3_STRENGTH: self->nr3_strength = (float)pv->value; break;
+    case PARAM_NR0_AGGRESSION:   self->nr0_aggression  = (float)pv->value; break;
+    case PARAM_NR0_MAX_NOTCHES:  self->nr0_max_notches = (int)pv->value;   break;
+    case PARAM_NR0_THRESHOLD:    self->nr0_threshold   = (float)pv->value; break;
     default: break;
     }
     self->params_dirty = true;
@@ -556,6 +594,7 @@ static void plugin_destroy(const clap_plugin_t *p)
         if (self->emnr[ch]) { destroy_emnr(self->emnr[ch]); self->emnr[ch] = NULL; }
         if (self->rnnr[ch]) { destroy_rnnr(self->rnnr[ch]); self->rnnr[ch] = NULL; }
         if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
+        if (self->nr0[ch])  { destroy_nr0 (self->nr0[ch]);  self->nr0[ch]  = NULL; }
         free(self->buf[ch]); self->buf[ch] = NULL;
     }
 
@@ -652,6 +691,11 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 self->sbnr[ch] = create_sbnr(0, 0, (int)max_frames,
                                              self->buf[ch], self->buf[ch], (int)sr);
 
+                nr_log("activate: creating NR0 ch=%d", ch);
+                self->nr0[ch] = create_nr0(self->nr0_aggression, self->nr0_max_notches, self->nr0_threshold);
+                if (!self->nr0[ch])
+                    nr_log("activate: create_nr0 returned NULL ch=%d -- NR0 disabled", ch);
+
                 if (!self->anr[ch] || !self->emnr[ch] || !self->rnnr[ch] || !self->sbnr[ch]) {
                     nr_log("activate: create_* returned NULL ch=%d anr=%p emnr=%p rnnr=%p sbnr=%p",
                            ch, (void*)self->anr[ch], (void*)self->emnr[ch],
@@ -747,6 +791,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 self->rnnr_out_avail[ch] = 0;
                 memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
                 memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
+                if (self->nr0[ch]) flush_nr0(self->nr0[ch]);
             }
             nr_log("reactivate: flushed, sr=%.0f frames=%u", sr, max_frames);
         }
@@ -854,6 +899,7 @@ static void plugin_reset(const clap_plugin_t *p)
              * buffer to drain their ring buffers on the next process() call. */
             if (self->buf[ch] && self->block_size > 0)
                 memset(self->buf[ch], 0, 2 * self->block_size * sizeof(double));
+            if (self->nr0[ch]) flush_nr0(self->nr0[ch]);
         }
         /* Reset RNNR staging buffers (NR already zeroed buf[ch]) */
         for (int ch = 0; ch < 2; ++ch) {
@@ -919,6 +965,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         apply_nr_mode(self, self->nr_mode);
         apply_anr_params(self);
         apply_emnr_params(self);
+        apply_nr0_params(self);
         for (int _ch = 0; _ch < 2; ++_ch)
             if (self->sbnr[_ch]) self->sbnr[_ch]->reduction_amount = self->nr4_reduction;
         if (self->nr3_model_dirty) {
@@ -985,6 +1032,16 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     for (uint32_t ch = 0; ch < proc_ch; ++ch) {
         float *src = in_buf->data32[ch];
         float *dst = out_buf->data32[ch];
+
+        /* NR0 (mode 5): direct float I/O -- skip double-precision buffer path */
+        if (self->nr_mode == 5) {
+            if (!src || !dst) continue;
+            if (self->nr0[ch] && self->nr0[ch]->run)
+                xnr0(self->nr0[ch], src, dst, (int)n);
+            else if (src != dst)
+                memcpy(dst, src, n * sizeof(float));
+            continue;
+        }
 
         /* Passthrough if audio pointers or NR buffer are missing */
         if (!src || !dst || !self->buf[ch]) {
@@ -1126,6 +1183,15 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                 dst[i] = (float)self->buf[ch][2 * i];
         }
     }
+    /* Update active notch counter for GUI display.  Audio thread writes one
+     * volatile int -- x86 aligned 32-bit store is atomic, safe for display. */
+    if (self->gui && self->nr_mode == 5) {
+        int cnt = 0;
+        for (int _ch = 0; _ch < 2; ++_ch)
+            if (self->nr0[_ch] && self->nr0[_ch]->active_notches > cnt)
+                cnt = self->nr0[_ch]->active_notches;
+        gui_set_nr0_active_notches(self->gui, cnt);
+    }
 #ifdef _WIN32
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         nr_log("process: SEH 0x%08lX escaped DSP -- disabling NR, passthroughing",
@@ -1168,7 +1234,7 @@ static bool params_get_info(const clap_plugin_t *p, uint32_t idx, clap_param_inf
         info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
         snprintf(info->name,   sizeof(info->name),   "NR Mode");
         snprintf(info->module, sizeof(info->module), "");
-        info->min_value = 0; info->max_value = 4; info->default_value = 0;
+        info->min_value = 0; info->max_value = 5; info->default_value = 0;
         return true;
     case PARAM_NR4_REDUCTION:
         info->id = PARAM_NR4_REDUCTION;
@@ -1240,6 +1306,27 @@ static bool params_get_info(const clap_plugin_t *p, uint32_t idx, clap_param_inf
         snprintf(info->module, sizeof(info->module), "NR3");
         info->min_value = 0.0; info->max_value = 1.0; info->default_value = 0.5;
         return true;
+    case PARAM_NR0_AGGRESSION:
+        info->id = PARAM_NR0_AGGRESSION;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+        snprintf(info->name,   sizeof(info->name),   "NR0 Aggressiveness");
+        snprintf(info->module, sizeof(info->module), "NR0");
+        info->min_value = 0.0; info->max_value = 100.0; info->default_value = 50.0;
+        return true;
+    case PARAM_NR0_MAX_NOTCHES:
+        info->id = PARAM_NR0_MAX_NOTCHES;
+        info->flags = CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_AUTOMATABLE;
+        snprintf(info->name,   sizeof(info->name),   "NR0 Max Notches");
+        snprintf(info->module, sizeof(info->module), "NR0");
+        info->min_value = 1; info->max_value = 10; info->default_value = 5;
+        return true;
+    case PARAM_NR0_THRESHOLD:
+        info->id = PARAM_NR0_THRESHOLD;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+        snprintf(info->name,   sizeof(info->name),   "NR0 Det. Threshold");
+        snprintf(info->module, sizeof(info->module), "NR0");
+        info->min_value = 3.0; info->max_value = 40.0; info->default_value = 10.0;
+        return true;
     default: return false;
     }
 }
@@ -1259,11 +1346,14 @@ static bool params_get_value(const clap_plugin_t *p, clap_id id, double *out)
     case PARAM_EMNR_AE_RUN:      *out = (double)self->emnr_ae_run;       return true;
     case PARAM_NR3_MODEL:        *out = (double)self->nr3_model;         return true;
     case PARAM_NR3_STRENGTH:     *out = (double)self->nr3_strength;      return true;
+    case PARAM_NR0_AGGRESSION:   *out = (double)self->nr0_aggression;    return true;
+    case PARAM_NR0_MAX_NOTCHES:  *out = (double)self->nr0_max_notches;   return true;
+    case PARAM_NR0_THRESHOLD:    *out = (double)self->nr0_threshold;     return true;
     default: return false;
     }
 }
 
-static const char *nr_mode_names[]         = { "Off", "NR 1", "NR 2", "NR 3", "NR 4" };
+static const char *nr_mode_names[]         = { "Off", "NR 1", "NR 2", "NR 3", "NR 4", "NR 0" };
 static const char *emnr_gain_method_names[]= { "RROE", "MEPSE", "MM-LSA" };
 static const char *emnr_npe_method_names[] = { "OSMS", "MMSE" };
 
@@ -1274,7 +1364,7 @@ static bool params_value_to_text(const clap_plugin_t *p, clap_id id, double val,
     switch (id) {
     case PARAM_NR_MODE: {
         int i = (int)val;
-        snprintf(buf, size, "%s", (i >= 0 && i <= 4) ? nr_mode_names[i] : "?");
+        snprintf(buf, size, "%s", (i >= 0 && i <= 5) ? nr_mode_names[i] : "?");
         return true; }
     case PARAM_NR4_REDUCTION:
         snprintf(buf, size, "%.1f dB", val); return true;
@@ -1301,6 +1391,12 @@ static bool params_value_to_text(const clap_plugin_t *p, clap_id id, double val,
         return true; }
     case PARAM_NR3_STRENGTH:
         snprintf(buf, size, "%.0f%%", val * 100.0); return true;
+    case PARAM_NR0_AGGRESSION:
+        snprintf(buf, size, "%.0f", val); return true;
+    case PARAM_NR0_MAX_NOTCHES:
+        snprintf(buf, size, "%d", (int)val); return true;
+    case PARAM_NR0_THRESHOLD:
+        snprintf(buf, size, "%.1f dB", val); return true;
     default: return false;
     }
 }
@@ -1311,7 +1407,7 @@ static bool params_text_to_value(const clap_plugin_t *p, clap_id id,
     (void)p;
     switch (id) {
     case PARAM_NR_MODE:
-        for (int i = 0; i <= 4; ++i)
+        for (int i = 0; i <= 5; ++i)
             if (strcmp(txt, nr_mode_names[i]) == 0) { *out = i; return true; }
         *out = atof(txt); return true;
     case PARAM_EMNR_GAIN_METHOD:
@@ -1414,6 +1510,9 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *stream)
     s.nr3_model         = self->nr3_model;
     s.nr3_strength      = self->nr3_strength;
     s.tooltips_on       = self->tooltips_on ? 1u : 0u;
+    s.nr0_aggression    = self->nr0_aggression;
+    s.nr0_max_notches   = (int32_t)self->nr0_max_notches;
+    s.nr0_threshold     = self->nr0_threshold;
     /* Write in a loop: hosts may provide chunked streams */
     int64_t written = 0;
     while (written < (int64_t)sizeof(s)) {
@@ -1441,7 +1540,9 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
      *   v1 = 52 bytes  (no nr3_model)
      *   v2 = 56 bytes  (adds nr3_model)
      *   v3 = 60 bytes  (adds nr3_strength)
-     *   v4 = 64 bytes  (adds tooltips_on) */
+     *   v4 = 64 bytes  (adds tooltips_on)
+     *   v5 = 72 bytes  (adds nr0_aggression + nr0_max_notches)
+     *   v6 = 76 bytes  (adds nr0_threshold) */
     if (got < (int64_t)sizeof(uint32_t)) return false;
     uint32_t min_bytes;
     switch (s.version) {
@@ -1449,6 +1550,8 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     case 2U: min_bytes = 56; break;
     case 3U: min_bytes = 60; break;
     case 4U: min_bytes = 64; break;
+    case 5U: min_bytes = 72; break;
+    case 6U: min_bytes = 76; break;
     default: return false;
     }
     if (got < (int64_t)min_bytes) return false;
@@ -1476,9 +1579,23 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     /* tooltips_on: from v4 onwards; default on for older states */
     self->tooltips_on = (s.version >= 4U) ? (s.tooltips_on != 0u) : true;
 
-    apply_nr_mode(self, (s.nr_mode >= 0 && s.nr_mode <= 4) ? s.nr_mode : 0);
+    /* NR0 params: from v5 onwards; default General preset (aggr=50, notches=5, thresh=10 dB) */
+    if (s.version >= 5U) {
+        self->nr0_aggression  = (s.nr0_aggression >= 0.0f && s.nr0_aggression <= 100.0f)
+                                ? s.nr0_aggression : 50.0f;
+        self->nr0_max_notches = (s.nr0_max_notches >= 1 && s.nr0_max_notches <= 10)
+                                ? (int)s.nr0_max_notches : 5;
+    } else {
+        self->nr0_aggression  = 50.0f;
+        self->nr0_max_notches = 5;
+    }
+    self->nr0_threshold = (s.version >= 6U && s.nr0_threshold >= 3.0f && s.nr0_threshold <= 40.0f)
+                          ? s.nr0_threshold : 10.0f;
+
+    apply_nr_mode(self, (s.nr_mode >= 0 && s.nr_mode <= 5) ? s.nr_mode : 0);
     apply_anr_params(self);
     apply_emnr_params(self);
+    apply_nr0_params(self);
     apply_nr3_model(self);
 
     if (self->gui) {
@@ -1492,6 +1609,9 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
         gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
         gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
         gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
+        gui_set_param(self->gui, PARAM_NR0_AGGRESSION,   (double)self->nr0_aggression);
+        gui_set_param(self->gui, PARAM_NR0_MAX_NOTCHES,  (double)self->nr0_max_notches);
+        gui_set_param(self->gui, PARAM_NR0_THRESHOLD,    (double)self->nr0_threshold);
         gui_set_tooltips(self->gui, self->tooltips_on);
     }
     return true;
@@ -1581,6 +1701,9 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
     gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
     gui_set_param(self->gui, PARAM_NR3_MODEL,        (double)self->nr3_model);
     gui_set_param(self->gui, PARAM_NR3_STRENGTH,     (double)self->nr3_strength);
+    gui_set_param(self->gui, PARAM_NR0_AGGRESSION,   (double)self->nr0_aggression);
+    gui_set_param(self->gui, PARAM_NR0_MAX_NOTCHES,  (double)self->nr0_max_notches);
+    gui_set_param(self->gui, PARAM_NR0_THRESHOLD,    (double)self->nr0_threshold);
     gui_set_tooltips(self->gui, self->tooltips_on);
     return true;
 }
@@ -1663,6 +1786,9 @@ static bool gui_plugin_show(const clap_plugin_t *p)
     gui_set_param(self->gui, PARAM_EMNR_GAIN_METHOD, (double)self->emnr_gain_method);
     gui_set_param(self->gui, PARAM_EMNR_NPE_METHOD,  (double)self->emnr_npe_method);
     gui_set_param(self->gui, PARAM_EMNR_AE_RUN,      (double)self->emnr_ae_run);
+    gui_set_param(self->gui, PARAM_NR0_AGGRESSION,   (double)self->nr0_aggression);
+    gui_set_param(self->gui, PARAM_NR0_MAX_NOTCHES,  (double)self->nr0_max_notches);
+    gui_set_param(self->gui, PARAM_NR0_THRESHOLD,    (double)self->nr0_threshold);
     return gui_show(self->gui);
 }
 
@@ -1765,7 +1891,7 @@ static const clap_plugin_descriptor_t s_desc = {
     .manual_url   = "",
     .support_url  = "",
     .version      = PLUGIN_VERSION,
-    .description  = "NR1/NR2/NR3/NR4 noise reduction for ham radio",
+    .description  = "NR0/NR1/NR2/NR3/NR4 noise reduction for ham radio",
     .features     = (const char *[]){ CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, NULL },
 };
 
@@ -1813,6 +1939,9 @@ static const clap_plugin_t *factory_create_plugin(const clap_plugin_factory_t *f
     self->emnr_npe_method   = 0;   /* OSMS   */
     self->emnr_ae_run       = 1;
     self->nr3_strength      = 0.5f;
+    self->nr0_aggression    = 50.0f;
+    self->nr0_max_notches   = 5;
+    self->nr0_threshold     = 10.0f;
     self->tooltips_on       = true;
 
     return pl;

@@ -907,7 +907,8 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     uint32_t nevents = ev->size(ev);
     for (uint32_t i = 0; i < nevents; ++i) {
         const clap_event_header_t *hdr = ev->get(ev, i);
-        if (hdr->type == CLAP_EVENT_PARAM_VALUE)
+        if (hdr->type == CLAP_EVENT_PARAM_VALUE &&
+            hdr->space_id == CLAP_CORE_EVENT_SPACE_ID)
             handle_param_event(self, (const clap_event_param_value_t *)hdr);
     }
 
@@ -1321,6 +1322,21 @@ static bool params_text_to_value(const clap_plugin_t *p, clap_id id,
         for (int i = 0; i <= 1; ++i)
             if (strcmp(txt, emnr_npe_method_names[i]) == 0) { *out = i; return true; }
         *out = atof(txt); return true;
+    case PARAM_EMNR_AE_RUN:
+        if (strcmp(txt, "On")  == 0) { *out = 1.0; return true; }
+        if (strcmp(txt, "Off") == 0) { *out = 0.0; return true; }
+        *out = atof(txt); return true;
+    case PARAM_NR3_MODEL: {
+        static const char *names[] = { "Standard", "Small", "Large" };
+        for (int i = 0; i <= 2; ++i)
+            if (strcmp(txt, names[i]) == 0) { *out = i; return true; }
+        *out = atof(txt); return true; }
+    case PARAM_NR3_STRENGTH: {
+        /* stored as 0.0-1.0, displayed as 0-100% */
+        char *pct = strchr(txt, '%');
+        *out = atof(txt) / 100.0;
+        (void)pct;
+        return true; }
     default:
         *out = atof(txt); return true;
     }
@@ -1352,7 +1368,8 @@ static void params_flush(const clap_plugin_t *p,
     uint32_t n = in_ev->size(in_ev);
     for (uint32_t i = 0; i < n; ++i) {
         const clap_event_header_t *hdr = in_ev->get(in_ev, i);
-        if (hdr->type == CLAP_EVENT_PARAM_VALUE)
+        if (hdr->type == CLAP_EVENT_PARAM_VALUE &&
+            hdr->space_id == CLAP_CORE_EVENT_SPACE_ID)
             handle_param_event(self, (const clap_event_param_value_t *)hdr);
     }
 
@@ -1383,6 +1400,7 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *stream)
 {
     clap_nr_t *self = (clap_nr_t *)p;
     clap_nr_state_t s;
+    memset(&s, 0, sizeof(s));  /* zero padding bytes for deterministic binary output */
     s.version           = STATE_VERSION;
     s.nr_mode           = self->nr_mode;
     s.nr4_reduction     = self->nr4_reduction;
@@ -1396,7 +1414,15 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *stream)
     s.nr3_model         = self->nr3_model;
     s.nr3_strength      = self->nr3_strength;
     s.tooltips_on       = self->tooltips_on ? 1u : 0u;
-    return stream->write(stream, &s, sizeof(s)) == (int64_t)sizeof(s);
+    /* Write in a loop: hosts may provide chunked streams */
+    int64_t written = 0;
+    while (written < (int64_t)sizeof(s)) {
+        int64_t w = stream->write(stream, (const char *)&s + written,
+                                  (uint32_t)(sizeof(s) - (size_t)written));
+        if (w <= 0) return false;
+        written += w;
+    }
+    return true;
 }
 
 static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
@@ -1404,7 +1430,13 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     clap_nr_t *self = (clap_nr_t *)p;
     clap_nr_state_t s;
     memset(&s, 0, sizeof(s));
-    int64_t got = stream->read(stream, &s, sizeof(s));
+    /* Read in a loop: hosts may provide chunked streams (e.g. 17 bytes at a time) */
+    int64_t got = 0;
+    while (got < (int64_t)sizeof(s)) {
+        int64_t r = stream->read(stream, (char *)&s + got, (uint32_t)(sizeof(s) - (size_t)got));
+        if (r <= 0) break;
+        got += r;
+    }
     /* Minimum bytes for each version:
      *   v1 = 52 bytes  (no nr3_model)
      *   v2 = 56 bytes  (adds nr3_model)

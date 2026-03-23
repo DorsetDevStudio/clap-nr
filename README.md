@@ -1,18 +1,5 @@
 # clap-nr
 
-**WORK IN PROGRESS - NOT READY FOR USE**
-
-This plugin is under active development and is not yet in a functional state.
-It will load in a compatible host, but you should expect broken or silent
-audio output and likely crashes. This is known. It is not a bug report
-waiting to happen - it is the current state of an unfinished project.
-
-Please do not open issues reporting broken audio, crashes, or missing
-functionality. We are aware. Issue reports of this kind will be closed
-without response until a formal testing release has been announced.
-
----
-
 **clap-nr** is a [CLAP](https://cleveraudio.org/) audio plugin that brings
 high-quality DSP noise-reduction to any host application that supports the
 CLAP plugin format.
@@ -43,6 +30,19 @@ requiring users to run any specific radio application to benefit from it.
 host application that supports the CLAP plugin format. If you are new to
 audio plugins, see the [CLAP host compatibility list](https://cleveraudio.org/)
 for suitable host applications.
+
+---
+
+## Download
+
+Pre-built installers for each release are available on the
+[GitHub Releases page](https://github.com/DorsetDevStudio/clap-nr/releases).
+
+**Windows** - download `clap-nr-x.x.x-setup.exe` and run it. The installer
+requires administrator rights and copies the plugin and all required runtime
+files to `%CommonProgramFiles%\CLAP\` automatically.
+
+**macOS and Linux** - build from source using the instructions below.
 
 ---
 
@@ -99,7 +99,27 @@ everything from scratch. You do not need any prior programming experience.
 <a name="windows"></a>
 ## Windows
 
-### Part 1 - Install the required tools (one time only)
+### Option A - Use the pre-built installer (recommended)
+
+If you just want to use the plugin and do not need to build it yourself:
+
+1. Go to the [Releases page](https://github.com/DorsetDevStudio/clap-nr/releases)
+   and download `clap-nr-x.x.x-setup.exe`.
+2. Run the installer. When Windows asks if you want to allow changes to your
+   device, click **Yes** (the installer is code-signed by Station Master Group Ltd).
+3. The plugin and all runtime files are installed to
+   `%CommonProgramFiles%\CLAP\` automatically.
+4. Open your CLAP-compatible host (for example, Station Master Pro) and
+   trigger a plugin rescan if needed.
+
+To uninstall, go to **Settings > Apps** (or **Control Panel > Programs and
+Features**), find **clap-nr**, and click Uninstall.
+
+---
+
+### Option B - Build from source
+
+#### Part 1 - Install the required tools (one time only)
 
 You only need to do this once. If you already have Git, CMake, and Visual
 Studio 2022 installed, skip to Part 2.
@@ -137,7 +157,7 @@ The Community edition is free.
 
 ---
 
-### Part 2 - Get the source code
+#### Part 2 - Get the source code
 
 1. Open **Command Prompt**. You can find it by pressing the Windows key,
    typing `cmd`, and pressing Enter.
@@ -158,7 +178,7 @@ The Community edition is free.
 
 ---
 
-### Part 3 - Build the plugin
+#### Part 3 - Build the plugin
 
 1. In the same Command Prompt window (still inside the `clap-nr` folder),
    type the following and press Enter:
@@ -178,7 +198,7 @@ and that CMake was added to the PATH (Part 1, Step 2).
 
 ---
 
-### Part 4 - Install the plugin
+#### Part 4 - Install the plugin
 
 The install script copies the plugin and its required support files to the
 standard Windows CLAP plugin folder so your host application can find it.
@@ -203,7 +223,7 @@ You may need to trigger a plugin rescan inside the host.
 
 ---
 
-### Part 5 - Uninstall the plugin
+#### Part 5 - Uninstall the plugin
 
 If you want to remove the plugin from your system:
 

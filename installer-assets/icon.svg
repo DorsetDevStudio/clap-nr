@@ -1,0 +1,52 @@
+<!-- icon.svg  --  clap-nr installer / application icon  -->
+<!-- Source SVG for reference. The actual ICO and PNGs are generated  -->
+<!-- by make-assets.py using Pillow, which draws the same design.     -->
+<!--                                                                  -->
+<!-- Design: yellow (#FFD700) on near-black (#111111)                 -->
+<!--   Left half:  jagged noisy waveform                              -->
+<!--   Right half: smooth clean sine wave                             -->
+<!--   Bumblebee diagonal stripe texture in background                -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <pattern id="stripes" width="36" height="36"
+             patternUnits="userSpaceOnUse"
+             patternTransform="rotate(-45 128 128)">
+      <rect width="18" height="36" fill="#FFD700" opacity="0.08"/>
+    </pattern>
+    <clipPath id="roundclip">
+      <rect width="256" height="256" rx="24"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background -->
+  <rect width="256" height="256" rx="24" fill="#111111"/>
+  <!-- Subtle diagonal stripe texture -->
+  <rect width="256" height="256" rx="24" fill="url(#stripes)"/>
+
+  <!-- Yellow top accent bar -->
+  <rect x="0" y="0" width="256" height="10" rx="2" fill="#FFD700" opacity="0.7"
+        clip-path="url(#roundclip)"/>
+
+  <!-- Noisy waveform: left half (x 22..118), centred on y=120 -->
+  <polyline
+    points="22,120 31,92 38,148 45,100 53,152 61,85 69,158 77,103 85,144 93,108 101,136 109,118 118,120"
+    fill="none" stroke="#FFD700" stroke-width="5"
+    stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Centre divider + right-pointing arrow -->
+  <line x1="128" y1="68" x2="128" y2="172" stroke="#FFD700" stroke-width="2" opacity="0.6"/>
+  <polygon points="122,113 138,120 122,127" fill="#FFD700"/>
+
+  <!-- Clean sine wave: right half (x 138..234), centred on y=120, amplitude 30 -->
+  <path d="M138,120 C152,90 168,90 182,120 C196,150 212,150 226,120"
+        fill="none" stroke="#FFD700" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- "NR" label at bottom -->
+  <text x="128" y="218" text-anchor="middle"
+        font-family="'Arial Black', Arial" font-weight="900"
+        font-size="42" fill="#FFD700" letter-spacing="6">NR</text>
+
+  <!-- Yellow bottom accent bar -->
+  <rect x="0" y="246" width="256" height="10" rx="2" fill="#FFD700" opacity="0.7"
+        clip-path="url(#roundclip)"/>
+</svg>

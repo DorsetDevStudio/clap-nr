@@ -171,6 +171,7 @@ struct clap_nr_gui_s {
     void               *plugin;
     gui_param_cb_t      on_param_change;
     gui_tooltips_cb_t   on_tooltips_change;
+    gui_close_cb_t      on_close;
 
 #ifdef _WIN32
     /* Window / D3D11 (Windows) */
@@ -1186,6 +1187,7 @@ static void *glfw_render_thread(void *arg)
             if (g->glfw_win && glfwWindowShouldClose(g->glfw_win)) {
                 g->running = false;
                 g->visible = false;
+                if (g->on_close) g->on_close(g->plugin);
             }
         });
     }
@@ -1242,6 +1244,7 @@ static void *glfw_render_thread(void *arg)
 
     g->thread_ready = true;
 
+    bool closed_by_user = false;
     while (g->running && !glfwWindowShouldClose(g->glfw_win)) {
         glfwPollEvents();
         if (g->visible)
@@ -1250,6 +1253,10 @@ static void *glfw_render_thread(void *arg)
             struct timespec ts = { 0, 16000000L };
             nanosleep(&ts, nullptr);
         }
+    }
+    if (glfwWindowShouldClose(g->glfw_win)) {
+        g->visible = false;
+        closed_by_user = true;
     }
 
     ImGui::SetCurrentContext(g->imgui_ctx);
@@ -1260,6 +1267,7 @@ static void *glfw_render_thread(void *arg)
     glfwDestroyWindow(g->glfw_win);
     g->glfw_win = nullptr;
     glfwTerminate();
+    if (closed_by_user && g->on_close) g->on_close(g->plugin);
     return nullptr;
 #endif /* __APPLE__ */
 }
@@ -1315,6 +1323,7 @@ static void macos_create_glfw_window(clap_nr_gui_s *g)
 
 clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
                           gui_tooltips_cb_t on_tooltips_change,
+                          gui_close_cb_t on_close,
                           const char *title)
 {
     auto *g = (clap_nr_gui_s *)calloc(1, sizeof(clap_nr_gui_s));
@@ -1322,6 +1331,7 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
     g->plugin              = plugin;
     g->on_param_change     = on_param_change;
     g->on_tooltips_change  = on_tooltips_change;
+    g->on_close            = on_close;
     strncpy(g->window_title, (title && title[0]) ? title : "CLAP NR", 255);
     g->window_title[255] = '\0';
     /* Defaults matching factory_create_plugin in clap_nr.c */

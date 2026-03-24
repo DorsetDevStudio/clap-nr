@@ -54,8 +54,8 @@ fi
 # -- Uninstall path ------------------------------------------------------------
 if [[ "$UNINSTALL" == true ]]; then
     TARGET="$DEST/$PLUGIN_NAME"
-    if [[ -f "$TARGET" ]]; then
-        rm -f "$TARGET"
+    if [[ -e "$TARGET" ]]; then
+        rm -rf "$TARGET"
         echo "Removed: $TARGET"
     else
         echo "Not installed at $TARGET -- nothing to remove."
@@ -70,10 +70,32 @@ if [[ ! -f "$PLUGIN_SRC" ]]; then
     exit 1
 fi
 
-# -- Install -------------------------------------------------------------------
-mkdir -p "$DEST"
-cp "$PLUGIN_SRC" "$DEST/$PLUGIN_NAME"
-echo "Installed: $DEST/$PLUGIN_NAME"
+# -- Install as a macOS bundle -------------------------------------------------
+# CLAP plugins on macOS must be bundles: clap-nr.clap/Contents/MacOS/clap-nr
+BUNDLE="$DEST/$PLUGIN_NAME"
+BINARY_DIR="$BUNDLE/Contents/MacOS"
+
+mkdir -p "$BINARY_DIR"
+cp "$PLUGIN_SRC" "$BINARY_DIR/clap-nr"
+
+# Write a minimal Info.plist so the OS recognises it as a bundle
+cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>  <string>clap-nr</string>
+  <key>CFBundleIdentifier</key>  <string>com.dorsetdevstudio.clap-nr</string>
+  <key>CFBundleName</key>        <string>clap-nr</string>
+  <key>CFBundlePackageType</key> <string>BNDL</string>
+  <key>CFBundleVersion</key>     <string>1.0.0</string>
+  <key>CFBundleSignature</key>   <string>????</string>
+</dict>
+</plist>
+PLIST
+
+echo "Installed: $BUNDLE"
 echo ""
 echo "You can now load the plugin in your CLAP host."
 echo "If your host was already open, restart it to pick up the new version."

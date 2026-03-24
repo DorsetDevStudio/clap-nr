@@ -48,15 +48,9 @@ done
 # -- Check required libraries -------------------------------------------------
 echo "Checking dependencies..."
 missing=()
-pkg-config --exists fftw3   || missing+=("fftw      (brew install fftw)")
-pkg-config --exists rnnoise || missing+=("rnnoise   (brew install rnnoise)")
-
-# specbleach may lack a pkg-config entry; check for the library directly
-HOMEBREW_PREFIX="$(brew --prefix 2>/dev/null || echo /usr/local)"
-if ! find "$HOMEBREW_PREFIX/lib" /usr/local/lib /opt/local/lib 2>/dev/null \
-        -name "libspecbleach*" -maxdepth 2 | grep -q .; then
-    missing+=("libspecbleach  (brew install libspecbleach  OR build from source)")
-fi
+pkg-config --exists fftw3        || missing+=("fftw         (brew install fftw)")
+pkg-config --exists rnnoise      || missing+=("rnnoise      (build from source: https://gitlab.xiph.org/xiph/rnnoise)")
+pkg-config --exists libspecbleach || missing+=("libspecbleach  (build from source v0.2.0: https://github.com/lucianodato/libspecbleach)")
 
 if [[ ${#missing[@]} -gt 0 ]]; then
     echo "ERROR: The following required libraries were not found:"
@@ -65,7 +59,9 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     done
     echo ""
     echo "Quick install:"
-    echo "  brew install fftw rnnoise libspecbleach"
+    echo "  brew install fftw"
+    echo "  # Build rnnoise from source: https://gitlab.xiph.org/xiph/rnnoise"
+    echo "  # Build libspecbleach v0.2.0 from source: https://github.com/lucianodato/libspecbleach"
     exit 1
 fi
 echo "All dependencies found."
@@ -98,7 +94,24 @@ echo "Build complete: $PLUGIN"
 # -- Install -------------------------------------------------------------------
 if [[ "$INSTALL" == true ]]; then
     CLAP_DIR="$HOME/Library/Audio/Plug-Ins/CLAP"
-    mkdir -p "$CLAP_DIR"
-    cp "$PLUGIN" "$CLAP_DIR/clap-nr.clap"
-    echo "Installed to: $CLAP_DIR/clap-nr.clap"
+    BUNDLE="$CLAP_DIR/clap-nr.clap"
+    BINARY_DIR="$BUNDLE/Contents/MacOS"
+    mkdir -p "$BINARY_DIR"
+    cp "$PLUGIN" "$BINARY_DIR/clap-nr"
+    cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key>  <string>clap-nr</string>
+  <key>CFBundleIdentifier</key>  <string>com.dorsetdevstudio.clap-nr</string>
+  <key>CFBundleName</key>        <string>clap-nr</string>
+  <key>CFBundlePackageType</key> <string>BNDL</string>
+  <key>CFBundleVersion</key>     <string>1.0.0</string>
+  <key>CFBundleSignature</key>   <string>????</string>
+</dict>
+</plist>
+PLIST
+    echo "Installed to: $BUNDLE"
 fi

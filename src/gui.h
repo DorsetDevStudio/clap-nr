@@ -49,6 +49,14 @@ typedef void (*gui_param_cb_t)(void *plugin, clap_id param_id, double value);
  */
 typedef void (*gui_tooltips_cb_t)(void *plugin, bool tooltips_on);
 
+/*
+ * Callback invoked on the main thread when the user closes the floating window
+ * (e.g. clicks the title-bar close button).  The plugin should notify the host
+ * via clap_host_gui_t::closed(host, false) so the host can update its UI.
+ * The window is hidden but NOT destroyed — the host may call gui_show() again.
+ */
+typedef void (*gui_close_cb_t)(void *plugin);
+
 /* -----------------------------------------------------------------------
  * Lifecycle
  * --------------------------------------------------------------------- */
@@ -57,6 +65,7 @@ typedef void (*gui_tooltips_cb_t)(void *plugin, bool tooltips_on);
  * title is used as the floating window caption (e.g. "Host  |  Plugin"). */
 clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
                            gui_tooltips_cb_t on_tooltips_change,
+                           gui_close_cb_t on_close,
                            const char *title);
 
 /* Free all GUI resources.  Called after gui_hide(). */

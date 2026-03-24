@@ -533,6 +533,19 @@ static void on_gui_tooltips_change(void *plugin_ptr, bool tooltips_on)
     if (hs) hs->mark_dirty(self->host);
 }
 
+static void on_gui_close(void *plugin_ptr)
+{
+    clap_nr_t *self = (clap_nr_t *)plugin_ptr;
+    /* Notify the host that the user closed the floating window.
+     * was_destroyed=false: we hid the window but did not destroy it.
+     * The host should update its "show GUI" button state; it must NOT
+     * call clap_plugin_gui_t::destroy() in response to this. */
+    const clap_host_gui_t *hg =
+        (const clap_host_gui_t *)self->host->get_extension(self->host, CLAP_EXT_GUI);
+    if (hg && hg->closed)
+        hg->closed(self->host, false);
+}
+
 /* -----------------------------------------------------------------------
  * Plugin vtable
  * --------------------------------------------------------------------- */
@@ -1639,6 +1652,12 @@ static bool gui_is_api_supported(const clap_plugin_t *p, const char *api, bool i
      * A plugin-owned floating window has no owner HWND, so Windows never
      * minimises it in response to the host minimising. */
     return strcmp(api, CLAP_WINDOW_API_WIN32) == 0 && !is_floating;
+#elif defined(__APPLE__)
+    /* macOS: floating Cocoa window only */
+    return strcmp(api, CLAP_WINDOW_API_COCOA) == 0 && is_floating;
+#elif defined(__linux__)
+    /* Linux: floating X11 window only */
+    return strcmp(api, CLAP_WINDOW_API_X11) == 0 && is_floating;
 #else
     return false;
 #endif
@@ -1684,7 +1703,7 @@ static bool gui_plugin_create(const clap_plugin_t *p, const char *api, bool is_f
         snprintf(gui_title, sizeof(gui_title), "%s  |  " PLUGIN_NAME, host_name);
     else
         snprintf(gui_title, sizeof(gui_title), "%s", PLUGIN_NAME);
-    self->gui = gui_create(self, on_gui_param_change, on_gui_tooltips_change, gui_title);
+    self->gui = gui_create(self, on_gui_param_change, on_gui_tooltips_change, on_gui_close, gui_title);
     if (!self->gui) return false;
 
     /* Sync the plugin's current parameter state to the freshly-created GUI.

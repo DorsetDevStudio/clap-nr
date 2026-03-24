@@ -40,6 +40,7 @@ warren@wpratt.com
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include "fftw3.h"
 
@@ -81,6 +82,8 @@ warren@wpratt.com
 #  define _aligned_free(p)          free(p)
 #else
 #  define nr_aligned_free(p)        free(p)
+   /* _aligned_free() is a Windows-only function; redirect to plain free() */
+#  define _aligned_free(p)          free(p)
 #endif
 
 /* -----------------------------------------------------------------------

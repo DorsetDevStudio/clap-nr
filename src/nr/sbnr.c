@@ -119,14 +119,15 @@ void xsbnr (SBNR a, int pos)
 {
     if (a->run && pos == a->position)
     {
-        SpectralBleachParameters parameters =
-              (SpectralBleachParameters){.residual_listen = false,
+        SpectralBleachAdaptiveParameters parameters =
+              (SpectralBleachAdaptiveParameters){.residual_listen = false,
                                  .reduction_amount = a->reduction_amount,
                                  .smoothing_factor = a->smoothing_factor,
                                  .whitening_factor = a->whitening_factor,
                                  .noise_scaling_type = a->noise_scaling_type,
                                  .noise_rescale = a->noise_rescale,
-                                 .post_filter_threshold = a->post_filter_threshold};
+                                 .post_filter_threshold = a->post_filter_threshold,
+                                 .noise_estimation_method = 0};
 
         specbleach_adaptive_load_parameters(a->st, parameters);
 

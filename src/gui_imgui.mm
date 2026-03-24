@@ -47,17 +47,20 @@
 #  include "imgui_impl_dx11.h"
    /* Forward-declare the ImGui Win32 message handler */
    extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+#elif defined(__APPLE__)
+    /* macOS: Cocoa NSWindow + NSOpenGLView, main-thread rendering via NSTimer */
+    /* Silence deprecation warnings — OpenGL still works on macOS 15 */
+#  define GL_SILENCE_DEPRECATION 1
+#  import  <Cocoa/Cocoa.h>
+#  include <OpenGL/gl3.h>
+#  include <OpenGL/CGLContext.h>
+#  include "imgui_impl_opengl3.h"
 #else
-    /* Linux and macOS: GLFW + OpenGL 3.3 */
+    /* Linux: GLFW + OpenGL 3.3 */
 #  include <GLFW/glfw3.h>
 #  include <pthread.h>
 #  include <time.h>
-#  ifdef __APPLE__
-#    include <OpenGL/gl3.h>
-#    include <dispatch/dispatch.h>   /* dispatch_async / dispatch_get_main_queue */
-#  else
-#    include <GL/gl.h>
-#  endif
+#  include <GL/gl.h>
 #  include "imgui_impl_glfw.h"
 #  include "imgui_impl_opengl3.h"
 #endif
@@ -171,6 +174,7 @@ struct clap_nr_gui_s {
     void               *plugin;
     gui_param_cb_t      on_param_change;
     gui_tooltips_cb_t   on_tooltips_change;
+    gui_close_cb_t      on_close;
 
 #ifdef _WIN32
     /* Window / D3D11 (Windows) */
@@ -182,18 +186,21 @@ struct clap_nr_gui_s {
     ID3D11RenderTargetView *rtv;
     UINT                    sc_w, sc_h;  /* swapchain dimensions */
     UINT_PTR                timer_id;
+#elif defined(__APPLE__)
+    /* macOS: Cocoa NSWindow + NSOpenGLView rendered on the MAIN THREAD.
+     * All GL calls happen on the main thread via an NSTimer, matching how
+     * Qt6 drives its own OpenGL widgets — no concurrent GL state corruption. */
+    NSWindow           *window;
+    NSOpenGLView       *gl_view;
+    NSTimer            *render_timer;
+    volatile bool       visible;
 #else
-    /* Window / OpenGL (Linux + macOS via GLFW) */
+    /* Linux: GLFW + OpenGL 3.3 render thread */
     GLFWwindow     *glfw_win;
     pthread_t       render_thread;
-    volatile bool   running;        /* render thread exit signal      */
-    volatile bool   visible;        /* whether the window is shown    */
-    volatile bool   thread_ready;   /* render thread has initialised  */
-    /* macOS: main-thread event pump uses a GLFW-based timer callback  */
-#  ifdef __APPLE__
-    volatile bool   do_show;        /* gui_show() sets; main pump acts */
-    volatile bool   do_hide;        /* gui_hide() sets; main pump acts */
-#  endif
+    volatile bool   running;
+    volatile bool   visible;
+    volatile bool   thread_ready;
 #endif
 
     /* Cached parameter values (written by gui_set_param on main thread,
@@ -390,6 +397,9 @@ static void render_frame(clap_nr_gui_s *g)
 #ifdef _WIN32
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
+#elif defined(__APPLE__)
+    /* DisplaySize/DeltaTime already set by mac_update_io() before this call */
+    ImGui_ImplOpenGL3_NewFrame();
 #else
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -912,16 +922,27 @@ static void render_frame(clap_nr_gui_s *g)
     glClearColor(COL_BG.x, COL_BG.y, COL_BG.z, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    glfwSwapBuffers(g->glfw_win);
-
+#  ifdef __APPLE__
+    /* Flush the double buffer.  The context is already current on the main
+     * thread (set by ClapNRRenderer before calling render_frame). */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CGLFlushDrawable((CGLContextObj)[[g->gl_view openGLContext] CGLContextObj]);
+#pragma clang diagnostic pop
     if (g->open_website) {
         g->open_website = false;
-#  ifdef __APPLE__
-        system("open https://clapnr.com");
-#  else
-        system("xdg-open https://clapnr.com");
-#  endif
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSWorkspace sharedWorkspace]
+                openURL:[NSURL URLWithString:@"https://clapnr.com"]];
+        });
     }
+#  else
+    glfwSwapBuffers(g->glfw_win);
+    if (g->open_website) {
+        g->open_website = false;
+        system("xdg-open https://clapnr.com");
+    }
+#  endif
 #endif
 }
 
@@ -1125,36 +1146,206 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
     return true;
 }
 
-#else /* !_WIN32 - Linux / macOS via GLFW + OpenGL3 */
+#elif defined(__APPLE__)
 
 /* -----------------------------------------------------------------------
- * GLFW render thread  (Linux / macOS)
- * Each plugin instance runs its own thread that owns the GLFW/OpenGL
- * context and drives rendering at ~60 fps.
- * --------------------------------------------------------------------- */
-/* -----------------------------------------------------------------------
- * GLFW render thread  (Linux / macOS)
+ * macOS: NSWindow + NSOpenGLView, rendered on the MAIN THREAD via NSTimer.
  *
- * On Linux: this thread calls glfwInit/glfwCreateWindow/glfwPollEvents.
- * On macOS: Cocoa requires ALL window/event calls on the main thread.
- *   This thread only makes/releases the GL context and renders; window
- *   creation and glfwPollEvents happen on the main thread via
- *   dispatch_async(dispatch_get_main_queue(), ...).
+ * Root cause of all previous crashes: Apple's OpenGL-over-Metal driver
+ * uses a process-global Metal device.  Calling CGLSetCurrentContext on ANY
+ * background thread corrupts the GL state used by Qt6's own OpenGL widgets
+ * (SpectrumWaterfallWidget etc.) running on the main thread → malloc
+ * corruption → crash in the host's paint engine.
+ *
+ * Fix: all GL calls happen on the main thread, driven by an NSTimer at
+ * ~60 fps — identical to how the Windows backend uses WM_TIMER.
+ * Multiple plugin instances each have their own NSOpenGLContext and their
+ * own NSTimer; zero shared state between instances.
  * --------------------------------------------------------------------- */
-static void *glfw_render_thread(void *arg)
+
+/* ---- Per-instance render-target helper object ---------------------- */
+@interface ClapNRRenderer : NSObject
+@property (assign) clap_nr_gui_s *gui;
+- (void)timerFired:(NSTimer *)timer;
+@end
+@implementation ClapNRRenderer
+- (void)timerFired:(NSTimer * __unused)timer
 {
-    clap_nr_gui_s *g = (clap_nr_gui_s *)arg;
+    clap_nr_gui_s *g = self.gui;
+    if (!g || !g->visible || !g->imgui_ctx) return;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [[g->gl_view openGLContext] makeCurrentContext];
+#pragma clang diagnostic pop
+    ImGui::SetCurrentContext(g->imgui_ctx);
+    ImGui::GetIO().DeltaTime = 1.0f / 60.0f;
+    render_frame(g);   /* calls CGLFlushDrawable */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [NSOpenGLContext clearCurrentContext];
+#pragma clang diagnostic pop
+}
+@end
 
-#ifdef __APPLE__
-    /* ---- macOS: window already created on main thread before this
-     *             thread is started.  Just take the GL context and render. */
-    if (!g->glfw_win) {
-        g->thread_ready = true;
-        return nullptr;
+/* ---- Window delegate ----------------------------------------------- */
+@interface ClapNRWindowDelegate : NSObject <NSWindowDelegate>
+@property (assign) clap_nr_gui_s *gui;
+@end
+@implementation ClapNRWindowDelegate
+- (BOOL)windowShouldBecomeKey:(NSWindow *)__unused sender  { return NO; }
+- (BOOL)windowShouldBecomeMain:(NSWindow *)__unused sender { return NO; }
+- (BOOL)windowShouldClose:(NSWindow *)sender
+{
+    [sender orderOut:nil];
+    clap_nr_gui_s *g = self.gui;
+    if (g) {
+        g->visible = false;
+        if (g->on_close) g->on_close(g->plugin);
     }
+    return NO;
+}
+@end
 
-    glfwMakeContextCurrent(g->glfw_win);
-    glfwSwapInterval(1);
+/* ---- GL view (input forwarding only — no rendering) ---------------- */
+@interface ClapNRGLView : NSOpenGLView
+@property (assign) clap_nr_gui_s *gui;
+@end
+@implementation ClapNRGLView
+
+- (BOOL)acceptsFirstResponder                   { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent *)__unused e { return NO;  }
+
+- (void)reshape
+{
+    [super reshape];
+    clap_nr_gui_s *g = self.gui;
+    if (!g || !g->imgui_ctx) return;
+    NSRect r = [self convertRectToBacking:[self bounds]];
+    ImGui::SetCurrentContext(g->imgui_ctx);
+    ImGui::GetIO().DisplaySize = ImVec2((float)r.size.width, (float)r.size.height);
+}
+
+- (void)forwardMouseEvent:(NSEvent *)event button:(int)btn down:(BOOL)down
+{
+    clap_nr_gui_s *g = self.gui;
+    if (!g || !g->imgui_ctx) return;
+    NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
+    NSRect r  = [self convertRectToBacking:[self bounds]];
+    float scale = (float)(r.size.height / self.bounds.size.height);
+    ImGui::SetCurrentContext(g->imgui_ctx);
+    ImGuiIO &io = ImGui::GetIO();
+    io.AddMousePosEvent((float)p.x * scale,
+                        (float)(self.bounds.size.height - p.y) * scale);
+    io.AddMouseButtonEvent(btn, down ? true : false);
+}
+
+- (void)mouseDown:(NSEvent *)e         { [self forwardMouseEvent:e button:ImGuiMouseButton_Left  down:YES]; }
+- (void)mouseUp:(NSEvent *)e           { [self forwardMouseEvent:e button:ImGuiMouseButton_Left  down:NO];  }
+- (void)rightMouseDown:(NSEvent *)e    { [self forwardMouseEvent:e button:ImGuiMouseButton_Right down:YES]; }
+- (void)rightMouseUp:(NSEvent *)e      { [self forwardMouseEvent:e button:ImGuiMouseButton_Right down:NO];  }
+- (void)mouseMoved:(NSEvent *)e        { [self forwardMouseEvent:e button:-1                     down:NO];  }
+- (void)mouseDragged:(NSEvent *)e      { [self forwardMouseEvent:e button:ImGuiMouseButton_Left  down:YES]; }
+- (void)rightMouseDragged:(NSEvent *)e { [self forwardMouseEvent:e button:ImGuiMouseButton_Right down:YES]; }
+
+- (void)scrollWheel:(NSEvent *)event
+{
+    clap_nr_gui_s *g = self.gui;
+    if (!g || !g->imgui_ctx) return;
+    ImGui::SetCurrentContext(g->imgui_ctx);
+    ImGui::GetIO().AddMouseWheelEvent((float)[event scrollingDeltaX],
+                                      (float)[event scrollingDeltaY]);
+}
+
+- (void)keyDown:(NSEvent *)event
+{
+    clap_nr_gui_s *g = self.gui;
+    if (!g || !g->imgui_ctx) return;
+    ImGui::SetCurrentContext(g->imgui_ctx);
+    NSString *chars = [event characters];
+    if (chars.length > 0)
+        ImGui::GetIO().AddInputCharactersUTF8([chars UTF8String]);
+}
+
+@end
+
+/* ---- mac_create_window / mac_destroy_window ------------------------ */
+
+static bool mac_create_window(clap_nr_gui_s *g)
+{
+    /* Must run on the main thread. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+    NSOpenGLPixelFormatAttribute attrs41[] = {
+        NSOpenGLPFAOpenGLProfile, NSOpenGLProfileVersion4_1Core,
+        NSOpenGLPFAColorSize,  24,
+        NSOpenGLPFAAlphaSize,   8,
+        NSOpenGLPFADepthSize,  24,
+        NSOpenGLPFADoubleBuffer,
+        NSOpenGLPFAAccelerated,
+        0
+    };
+    NSOpenGLPixelFormat *fmt = [[NSOpenGLPixelFormat alloc] initWithAttributes:attrs41];
+    if (!fmt) {
+        NSOpenGLPixelFormatAttribute attrs32[] = {
+            NSOpenGLPFAOpenGLProfile, NSOpenGLProfileVersion3_2Core,
+            NSOpenGLPFAColorSize,  24,
+            NSOpenGLPFAAlphaSize,   8,
+            NSOpenGLPFADepthSize,  24,
+            NSOpenGLPFADoubleBuffer,
+            NSOpenGLPFAAccelerated,
+            0
+        };
+        fmt = [[NSOpenGLPixelFormat alloc] initWithAttributes:attrs32];
+    }
+    if (!fmt) { NSLog(@"clap-nr: NSOpenGLPixelFormat alloc failed"); return false; }
+
+    NSRect frame = NSMakeRect(200, 200, GUI_BASE_W, GUI_BASE_H);
+    ClapNRGLView *view = [[ClapNRGLView alloc] initWithFrame:frame pixelFormat:fmt];
+    if (!view) { NSLog(@"clap-nr: ClapNRGLView alloc failed"); return false; }
+    view.gui = g;
+    [view setWantsBestResolutionOpenGLSurface:YES];
+
+    NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                     | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
+    NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
+                                               styleMask:style
+                                                 backing:NSBackingStoreBuffered
+                                                   defer:NO];
+    if (!win) { NSLog(@"clap-nr: NSWindow alloc failed"); return false; }
+#pragma clang diagnostic pop
+
+    ClapNRWindowDelegate *delegate = [[ClapNRWindowDelegate alloc] init];
+    delegate.gui = g;
+    [win setDelegate:delegate];
+    [win setTitle:[NSString stringWithUTF8String:g->window_title]];
+    [win setContentView:view];
+    [win setAcceptsMouseMovedEvents:YES];
+    [win setMinSize:NSMakeSize(GUI_BASE_W, GUI_BASE_H)];
+    [win setLevel:NSFloatingWindowLevel];
+    [win setHidesOnDeactivate:NO];
+    [win setExcludedFromWindowsMenu:YES];
+    [win setCollectionBehavior: NSWindowCollectionBehaviorCanJoinAllSpaces
+                               | NSWindowCollectionBehaviorStationary
+                               | NSWindowCollectionBehaviorIgnoresCycle
+                               | NSWindowCollectionBehaviorFullScreenAuxiliary];
+    [win setReleasedWhenClosed:NO];
+    [win orderFront:nil];
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    NSOpenGLContext *glctx = [view openGLContext];
+    if (!glctx) {
+        [win orderOut:nil];
+        NSLog(@"clap-nr: openGLContext nil after orderFront");
+        return false;
+    }
+    GLint swapInterval = 0;
+    [glctx setValues:&swapInterval forParameter:NSOpenGLContextParameterSwapInterval];
+
+    /* All GL init on the main thread — same thread as all future rendering. */
+    [glctx makeCurrentContext];
+#pragma clang diagnostic pop
 
     IMGUI_CHECKVERSION();
     g->imgui_ctx = ImGui::CreateContext();
@@ -1162,45 +1353,81 @@ static void *glfw_render_thread(void *arg)
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    NSRect backing = [view convertRectToBacking:[view bounds]];
+    io.DisplaySize = ImVec2((float)backing.size.width, (float)backing.size.height);
     apply_theme();
+    ImGui_ImplOpenGL3_Init("#version 410");
 
-    ImGui_ImplGlfw_InitForOpenGL(g->glfw_win, true);
-    ImGui_ImplOpenGL3_Init("#version 330 core");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [NSOpenGLContext clearCurrentContext];
+#pragma clang diagnostic pop
 
-    g->thread_ready = true;
+    g->gl_view  = view;
+    g->window   = win;
+    g->visible  = true;
 
-    while (g->running) {
-        /* Poll for window-close from render thread is NOT safe on macOS;
-         * the main thread checks glfwWindowShouldClose in its pump instead.
-         * Just render if visible, otherwise idle. */
-        if (g->visible) {
-            render_frame(g);
-        } else {
-            struct timespec ts = { 0, 16000000L };
-            nanosleep(&ts, nullptr);
-        }
-        /* Drive GLFW event polling on the main thread (~60 Hz) */
-        dispatch_async(dispatch_get_main_queue(), ^{
-            glfwPollEvents();
-            /* Stop rendering if the user closed the window */
-            if (g->glfw_win && glfwWindowShouldClose(g->glfw_win)) {
-                g->running = false;
-                g->visible = false;
-            }
-        });
+    /* Start 60 fps timer on the main run loop.
+     * NSRunLoopCommonModes ensures the timer fires even while the host
+     * is tracking mouse events in its own controls. */
+    ClapNRRenderer *renderer = [[ClapNRRenderer alloc] init];
+    renderer.gui = g;
+    g->render_timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 60.0)
+                                                       target:renderer
+                                                     selector:@selector(timerFired:)
+                                                     userInfo:nil
+                                                      repeats:YES];
+    [[NSRunLoop mainRunLoop] addTimer:g->render_timer forMode:NSRunLoopCommonModes];
+
+    NSLog(@"clap-nr: mac_create_window OK, DisplaySize=%.0fx%.0f",
+          io.DisplaySize.x, io.DisplaySize.y);
+    return true;
+}
+
+static void mac_destroy_window(clap_nr_gui_s *g)
+{
+    /* Must run on the main thread. */
+
+    /* Stop the timer before any GL teardown so no more renders fire. */
+    if (g->render_timer) {
+        [g->render_timer invalidate];
+        g->render_timer = nullptr;
     }
 
-    glfwMakeContextCurrent(g->glfw_win); /* ensure we own it for cleanup */
-    ImGui::SetCurrentContext(g->imgui_ctx);
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext(g->imgui_ctx);
-    g->imgui_ctx = nullptr;
-    glfwMakeContextCurrent(nullptr);
-    return nullptr;
+    /* GL shutdown on the main thread — same thread as all rendering. */
+    if (g->imgui_ctx) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [[g->gl_view openGLContext] makeCurrentContext];
+#pragma clang diagnostic pop
+        ImGui::SetCurrentContext(g->imgui_ctx);
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui::DestroyContext(g->imgui_ctx);
+        g->imgui_ctx = nullptr;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [NSOpenGLContext clearCurrentContext];
+#pragma clang diagnostic pop
+    }
 
-#else
-    /* ---- Linux: this thread owns all GLFW operations. ---------------- */
+    g->gl_view = nullptr;
+
+    if (g->window) {
+        [g->window orderOut:nil];
+        g->window = nullptr;
+    }
+}
+
+#else /* Linux */
+
+/* -----------------------------------------------------------------------
+ * Linux: GLFW + OpenGL 3.3 render thread
+ * --------------------------------------------------------------------- */
+static void *glfw_render_thread(void *arg)
+{
+    clap_nr_gui_s *g = (clap_nr_gui_s *)arg;
+
+
     if (!glfwInit()) {
         g->thread_ready = true;
         return nullptr;
@@ -1261,53 +1488,18 @@ static void *glfw_render_thread(void *arg)
     g->glfw_win = nullptr;
     glfwTerminate();
     return nullptr;
-#endif /* __APPLE__ */
 }
 
-/* Spin-wait with a 2-second timeout for the render thread to be ready. */
 static bool wait_for_thread_ready(clap_nr_gui_s *g)
 {
     for (int i = 0; i < 2000 && !g->thread_ready; ++i) {
-        struct timespec ts = { 0, 1000000L }; /* 1 ms */
+        struct timespec ts = { 0, 1000000L };
         nanosleep(&ts, nullptr);
     }
     return g->glfw_win != nullptr && g->imgui_ctx != nullptr;
 }
 
-#ifdef __APPLE__
-/* -----------------------------------------------------------------------
- * macOS main-thread window creation helper.
- * Must be called (via dispatch_sync to main queue) before starting the
- * render thread.  Creates the GLFW window but does NOT make the GL context
- * current — the render thread takes ownership immediately after.
- * --------------------------------------------------------------------- */
-static void macos_create_glfw_window(clap_nr_gui_s *g)
-{
-    if (!glfwInit()) return;
-
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-    glfwWindowHint(GLFW_VISIBLE,   GLFW_FALSE);   /* shown explicitly later */
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-    glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
-
-    g->glfw_win = glfwCreateWindow(GUI_BASE_W, GUI_BASE_H,
-                                    g->window_title, nullptr, nullptr);
-    if (!g->glfw_win) return;
-
-    glfwSetWindowUserPointer(g->glfw_win, g);
-    glfwSetWindowSizeLimits(g->glfw_win,
-                             GUI_BASE_W, GUI_BASE_H,
-                             GLFW_DONT_CARE, GLFW_DONT_CARE);
-
-    /* Release context so the render thread can take it */
-    glfwMakeContextCurrent(nullptr);
-}
-#endif /* __APPLE__ */
-
-#endif /* !_WIN32 */
+#endif /* platform backend */
 
 /* -----------------------------------------------------------------------
  * Public API that matches gui.h
@@ -1315,6 +1507,7 @@ static void macos_create_glfw_window(clap_nr_gui_s *g)
 
 clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
                           gui_tooltips_cb_t on_tooltips_change,
+                          gui_close_cb_t on_close,
                           const char *title)
 {
     auto *g = (clap_nr_gui_s *)calloc(1, sizeof(clap_nr_gui_s));
@@ -1322,6 +1515,7 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
     g->plugin              = plugin;
     g->on_param_change     = on_param_change;
     g->on_tooltips_change  = on_tooltips_change;
+    g->on_close            = on_close;
     strncpy(g->window_title, (title && title[0]) ? title : "CLAP NR", 255);
     g->window_title[255] = '\0';
     /* Defaults matching factory_create_plugin in clap_nr.c */
@@ -1358,24 +1552,19 @@ void gui_destroy(clap_nr_gui_t *gui)
         }
     }
 #else
+#  ifdef __APPLE__
+    if ([NSThread isMainThread]) {
+        mac_destroy_window(gui);
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{ mac_destroy_window(gui); });
+    }
+#  else /* Linux */
     if (gui->render_thread) {
         gui->running = false;
         gui->visible = false;
         pthread_join(gui->render_thread, nullptr);
         gui->render_thread = 0;
     }
-#  ifdef __APPLE__
-    /* Window/GLFW teardown must happen on the main thread */
-    if (gui->glfw_win) {
-        GLFWwindow *win = gui->glfw_win;
-        gui->glfw_win = nullptr;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            glfwDestroyWindow(win);
-            glfwTerminate();
-        });
-    }
-#  else
-    /* Linux render thread already destroyed its own window */
 #  endif
 #endif
     free(gui);
@@ -1494,38 +1683,33 @@ bool gui_show(clap_nr_gui_t *gui)
 
 #else  /* Linux / macOS */
 #  ifdef __APPLE__
-    /* macOS: create the GLFW window on the main thread first, then start
-     * the render thread which takes the GL context and renders. */
-    if (!gui->glfw_win) {
-        /* dispatch_sync ensures the window exists before we continue */
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            macos_create_glfw_window(gui);
-        });
-        if (!gui->glfw_win) return false;
-
-        gui->running      = true;
-        gui->visible      = false;
-        gui->thread_ready = false;
-        if (pthread_create(&gui->render_thread, nullptr, glfw_render_thread, gui) != 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                glfwDestroyWindow(gui->glfw_win);
-                gui->glfw_win = nullptr;
-                glfwTerminate();
-            });
-            return false;
+    /* macOS: create NSPanel + pthread render thread on the main thread.
+     * CLAP hosts call gui_show() from the main thread, so dispatch_sync
+     * to the main queue would deadlock.  Detect main thread and call
+     * directly; fall back to dispatch_sync only if on another thread. */
+    if (!gui->window) {
+        bool ok = false;
+        if ([NSThread isMainThread]) {
+            ok = mac_create_window(gui);
+        } else {
+            __block bool _ok = false;
+            dispatch_sync(dispatch_get_main_queue(), ^{ _ok = mac_create_window(gui); });
+            ok = _ok;
         }
-        if (!wait_for_thread_ready(gui)) return false;
+        if (!ok) return false;
+        /* mac_create_window already shows the window and sets visible = true */
+        return true;
     }
-    /* Show the window on the main thread */
+    /* Window already exists — just ensure it's on screen if not already visible. */
     gui->visible = true;
-    GLFWwindow *win = gui->glfw_win;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (win) {
-            glfwShowWindow(win);
-            glfwFocusWindow(win);
-            /* Keep the main thread pumping GLFW events for this window */
-        }
-    });
+    NSWindow *win = gui->window;
+    if ([NSThread isMainThread]) {
+        if (![win isVisible]) [win orderFront:nil];
+    } else {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (![win isVisible]) [win orderFront:nil];
+        });
+    }
     return true;
 
 #  else  /* Linux */
@@ -1553,15 +1737,18 @@ bool gui_hide(clap_nr_gui_t *gui)
     if (!gui->hwnd) return false;
     ShowWindow(gui->hwnd, SW_HIDE);
 #else
-    if (!gui->glfw_win) return false;
     gui->visible = false;
 #  ifdef __APPLE__
-    GLFWwindow *win = gui->glfw_win;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (win) glfwHideWindow(win);
-    });
+    if (gui->window) {
+        NSWindow *win = gui->window;
+        if ([NSThread isMainThread]) {
+            [win orderOut:nil];
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{ [win orderOut:nil]; });
+        }
+    }
 #  else
-    glfwHideWindow(gui->glfw_win);
+    if (gui->glfw_win) glfwHideWindow(gui->glfw_win);
 #  endif
 #endif
     return true;
@@ -1577,14 +1764,19 @@ bool gui_resize(clap_nr_gui_t *gui, uint32_t w, uint32_t h)
     SetWindowPos(gui->hwnd, nullptr, 0, 0, (int)nw, (int)nh,
                  SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
 #else
-    if (!gui->glfw_win) return false;
     int nw = (int)((w < GUI_BASE_W) ? GUI_BASE_W : w);
     int nh = (int)((h < GUI_BASE_H) ? GUI_BASE_H : h);
 #  ifdef __APPLE__
+    if (!gui->window) return false;
+    NSWindow *win = gui->window;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (gui->glfw_win) glfwSetWindowSize(gui->glfw_win, nw, nh);
+        NSRect frame = [win frame];
+        frame.size.width  = nw;
+        frame.size.height = nh;
+        [win setFrame:frame display:YES];
     });
 #  else
+    if (!gui->glfw_win) return false;
     glfwSetWindowSize(gui->glfw_win, nw, nh);
 #  endif
 #endif

@@ -58,10 +58,9 @@ if(WIN32)
         ${IMGUI_DIR}/imgui_impl_dx11.cpp
     )
 elseif(APPLE)
-    # macOS: GLFW platform layer + OpenGL 3.3 renderer (same as Linux)
+    # macOS: native Cocoa backend (NSWindow + CVDisplayLink) — no GLFW
     list(APPEND IMGUI_SOURCES
         ${IMGUI_CORE_SOURCES}
-        ${IMGUI_DIR}/imgui_impl_glfw.cpp
         ${IMGUI_DIR}/imgui_impl_opengl3.cpp
     )
 else()
@@ -78,9 +77,14 @@ endif()
 # -----------------------------------------------------------------------
 set(PLUGIN_SOURCES
     src/clap_nr.c
-    src/gui_imgui.cpp
     ${IMGUI_SOURCES}
 )
+if(APPLE)
+    # Objective-C++ file for native Cocoa GUI backend
+    list(APPEND PLUGIN_SOURCES src/gui_imgui.mm)
+else()
+    list(APPEND PLUGIN_SOURCES src/gui_imgui.cpp)
+endif()
 
 # -----------------------------------------------------------------------
 # Build the plugin as a shared library (.clap on all platforms)
@@ -121,26 +125,26 @@ if(WIN32)
     target_compile_definitions(clap-nr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX CLAP_NR_STANDALONE=1)
 
 elseif(APPLE)
-    # --- macOS: Homebrew libraries + GLFW/OpenGL for GUI -----------------
+    # --- macOS: Homebrew libraries + native Cocoa/CVDisplayLink/OpenGL for GUI
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFTW3   REQUIRED fftw3)
-    pkg_check_modules(RNNOISE REQUIRED rnnoise)
-    # libspecbleach may not have a pkg-config entry; try find_library fallback
-    find_library(SPECBLEACH_LIB NAMES specbleach REQUIRED)
-    find_package(glfw3   REQUIRED)
+    pkg_check_modules(FFTW3   REQUIRED IMPORTED_TARGET fftw3)
+    pkg_check_modules(RNNOISE REQUIRED IMPORTED_TARGET rnnoise)
+    pkg_check_modules(SPECBLEACH REQUIRED IMPORTED_TARGET libspecbleach)
     find_package(OpenGL  REQUIRED)
 
     target_include_directories(clap-nr PRIVATE
         ${FFTW3_INCLUDE_DIRS}
         ${RNNOISE_INCLUDE_DIRS}
+        ${SPECBLEACH_INCLUDE_DIRS}
     )
     target_link_libraries(clap-nr PRIVATE
-        ${FFTW3_LIBRARIES}
-        ${RNNOISE_LIBRARIES}
-        ${SPECBLEACH_LIB}
-        glfw
+        PkgConfig::FFTW3
+        PkgConfig::RNNOISE
+        PkgConfig::SPECBLEACH
         OpenGL::GL
         pthread
+        "-framework Cocoa"
+        "-framework CoreFoundation"
     )
     target_compile_definitions(clap-nr PRIVATE CLAP_NR_STANDALONE=1)
     # Hide all symbols by default; only CLAP_EXPORT entry point is visible
@@ -152,9 +156,9 @@ elseif(APPLE)
 else()
     # --- Linux: system libraries via pkg-config -----------------------------
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFTW3   REQUIRED fftw3)
-    pkg_check_modules(RNNOISE REQUIRED rnnoise)
-    pkg_check_modules(SPECBLEACH REQUIRED specbleach)
+    pkg_check_modules(FFTW3   REQUIRED IMPORTED_TARGET fftw3)
+    pkg_check_modules(RNNOISE REQUIRED IMPORTED_TARGET rnnoise)
+    pkg_check_modules(SPECBLEACH REQUIRED IMPORTED_TARGET libspecbleach)
     find_package(glfw3 REQUIRED)
     find_package(OpenGL REQUIRED)
 
@@ -164,9 +168,9 @@ else()
         ${SPECBLEACH_INCLUDE_DIRS}
     )
     target_link_libraries(clap-nr PRIVATE
-        ${FFTW3_LIBRARIES}
-        ${RNNOISE_LIBRARIES}
-        ${SPECBLEACH_LIBRARIES}
+        PkgConfig::FFTW3
+        PkgConfig::RNNOISE
+        PkgConfig::SPECBLEACH
         glfw
         OpenGL::GL
         pthread

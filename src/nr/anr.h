@@ -27,6 +27,8 @@ warren@wpratt.com
 #ifndef _anr_h
 #define _anr_h
 
+#include "comm.h"
+
 #define ANR_DLINE_SIZE 2048
 
 typedef struct _anr
@@ -90,18 +92,18 @@ extern void setSize_anr (ANR a, int size);
 
 // RXA Properties
 
-extern __declspec (dllexport) void SetRXAANRRun (int channel, int setit);
+extern PORT void SetRXAANRRun (int channel, int setit);
 
-extern __declspec (dllexport) void SetRXAANRVals (int channel, int taps, int delay, double gain, double leakage);
+extern PORT void SetRXAANRVals (int channel, int taps, int delay, double gain, double leakage);
 
-extern __declspec (dllexport) void SetRXAANRTaps (int channel, int taps);
+extern PORT void SetRXAANRTaps (int channel, int taps);
 
-extern __declspec (dllexport) void SetRXAANRDelay (int channel, int delay);
+extern PORT void SetRXAANRDelay (int channel, int delay);
 
-extern __declspec (dllexport) void SetRXAANRGain (int channel, double gain);
+extern PORT void SetRXAANRGain (int channel, double gain);
 
-extern __declspec (dllexport) void SetRXAANRLeakage (int channel, double leakage);
+extern PORT void SetRXAANRLeakage (int channel, double leakage);
 
-extern __declspec (dllexport) void SetRXAANRPosition (int channel, int position);
+extern PORT void SetRXAANRPosition (int channel, int position);
 
 #endif

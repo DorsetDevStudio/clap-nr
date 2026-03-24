@@ -213,7 +213,7 @@ int readZetaHat(const char* zeta_file, int* rows, int* cols,
 	sprintf(zetaBinary, "%s%s", zeta_file, bin);
 	FILE* pzetaBinary;
 	int e = 0;
-	if (pzetaBinary = fopen (zetaBinary, "rb")) 
+	if ((pzetaBinary = fopen (zetaBinary, "rb"))) 
 	{
 		int nvals = 0;
 		// 'fread's executed only through first error
@@ -253,7 +253,7 @@ void CwriteZetaHat(const char* cfile, int zetaHat_rows, int zetaHat_cols,
 	char dot_c[50] = ".c";
 	sprintf(cfilename, "%s%s", cfile, dot_c);
 	FILE* pcfile;
-	if (pcfile = fopen(cfilename, "w"))
+	if ((pcfile = fopen(cfilename, "w")))
 	{
 	fprintf(pcfile, "int CzetaRows = %d;\n", zetaHat_rows);
 	fprintf(pcfile, "int CzetaCols = %d;\n", zetaHat_cols);
@@ -377,7 +377,7 @@ void calc_emnr(EMNR a)
 	//
 	a->g.GG = (double *)malloc0(241 * 241 * sizeof(double));
 	a->g.GGS = (double *)malloc0(241 * 241 * sizeof(double));
-	if (a->g.fileb = fopen("calculus", "rb"))
+	if ((a->g.fileb = fopen("calculus", "rb")))
 	{
 		fread(a->g.GG, sizeof(double), 241 * 241, a->g.fileb);
 		fread(a->g.GGS, sizeof(double), 241 * 241, a->g.fileb);

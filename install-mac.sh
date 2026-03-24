@@ -78,6 +78,18 @@ BINARY_DIR="$BUNDLE/Contents/MacOS"
 mkdir -p "$BINARY_DIR"
 cp "$PLUGIN_SRC" "$BINARY_DIR/clap-nr"
 
+# Copy RNNoise weights files alongside the binary so NR3 small/large models work.
+# apply_nr3_model() uses dladdr() to find the binary path, then looks for the
+# .bin files in the same directory (Contents/MacOS/).
+WEIGHTS_SRC="$SCRIPT_DIR/libs/rnnoise"
+for f in rnnoise_weights_small.bin rnnoise_weights_large.bin; do
+    if [[ -f "$WEIGHTS_SRC/$f" ]]; then
+        cp "$WEIGHTS_SRC/$f" "$BINARY_DIR/$f"
+    else
+        echo "WARNING: weights file not found: $WEIGHTS_SRC/$f"
+    fi
+done
+
 # Write a minimal Info.plist so the OS recognises it as a bundle
 cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

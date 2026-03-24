@@ -395,11 +395,6 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
         if (entering_nr0 && self->nr0[ch])
             flush_nr0(self->nr0[ch]);
     }
-    nr_log("apply_nr_mode: mode=%d  emnr[0].run=%d emnr[1].run=%d  reset=%d",
-           new_mode,
-           (self->emnr[0] ? self->emnr[0]->run : -1),
-           (self->emnr[1] ? self->emnr[1]->run : -1),
-           (int)entering_nr2);
 }
 
 /* -----------------------------------------------------------------------
@@ -661,7 +656,6 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
                 if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); goto activate_done; }
 
-                nr_log("activate: creating ANR ch=%d sr=%.0f frames=%u", ch, sr, max_frames);
                 self->anr[ch]  = create_anr(0, 0, (int)max_frames,
                                             self->buf[ch], self->buf[ch],
                                             2048,
@@ -691,7 +685,6 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 memset(self->emnr_outbuf[ch], 0, sizeof(self->emnr_outbuf[ch]));
                 memset(self->emnr_outq[ch],   0, sizeof(self->emnr_outq[ch]));
 
-                nr_log("activate: creating RNNR ch=%d", ch);
                 self->rnnr[ch] = create_rnnr(0, 0, (int)max_frames,
                                              self->buf[ch], self->buf[ch], (int)sr);
                 self->rnnr_in_count[ch]  = 0;
@@ -700,11 +693,9 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
                 memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
 
-                nr_log("activate: creating SBNR ch=%d", ch);
                 self->sbnr[ch] = create_sbnr(0, 0, (int)max_frames,
                                              self->buf[ch], self->buf[ch], (int)sr);
 
-                nr_log("activate: creating NR0 ch=%d", ch);
                 self->nr0[ch] = create_nr0(self->nr0_aggression, self->nr0_max_notches, self->nr0_threshold);
                 if (!self->nr0[ch])
                     nr_log("activate: create_nr0 returned NULL ch=%d -- NR0 disabled", ch);
@@ -733,7 +724,6 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
 
             if (max_frames != self->block_size) {
                 /* Block size changed -- reallocate shared buffers and notify instances */
-                nr_log("reactivate: block size %u -> %u", self->block_size, max_frames);
                 for (int ch = 0; ch < 2; ++ch) {
                     free(self->buf[ch]);
                     self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
@@ -772,7 +762,6 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
             }
 
             if ((int)sr != (int)self->sample_rate) {
-                nr_log("reactivate: sample rate %.0f -> %.0f", self->sample_rate, sr);
                 for (int ch = 0; ch < 2; ++ch) {
                     if (self->emnr[ch]) setSamplerate_emnr(self->emnr[ch], (int)sr);
                     if (self->rnnr[ch]) setSamplerate_rnnr(self->rnnr[ch], (int)sr);
@@ -806,11 +795,9 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                 memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
                 if (self->nr0[ch]) flush_nr0(self->nr0[ch]);
             }
-            nr_log("reactivate: flushed, sr=%.0f frames=%u", sr, max_frames);
         }
 
         apply_nr_mode(self, self->nr_mode);
-        nr_log("activate: success mode=%d", self->nr_mode);
         ok = true;
 #ifdef _WIN32
     }

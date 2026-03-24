@@ -2,7 +2,15 @@
 # Build output directories
 # -----------------------------------------------------------------------
 /build/
+/build-mac/
 /out/
+/dist/
+
+# -----------------------------------------------------------------------
+# Local credentials -- NEVER commit these
+# -----------------------------------------------------------------------
+.env.mac
+.env
 
 # Build log captured during development
 build_output.txt

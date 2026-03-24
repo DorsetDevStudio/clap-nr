@@ -2,14 +2,13 @@
 # install-mac.sh  --  install clap-nr.clap on macOS (Apple Silicon / arm64)
 #
 # Usage:
-#   ./install-mac.sh              # install to ~/Library/Audio/Plug-Ins/CLAP/  (per-user)
-#   ./install-mac.sh --system     # install to /Library/Audio/Plug-Ins/CLAP/   (requires sudo)
-#   ./install-mac.sh --uninstall  # remove from ~/Library/Audio/Plug-Ins/CLAP/
-#   ./install-mac.sh --system --uninstall
+#   sudo ./install-mac.sh             # install to /Library/Audio/Plug-Ins/CLAP/  (system, default)
+#   ./install-mac.sh --user           # install to ~/Library/Audio/Plug-Ins/CLAP/ (per-user, no sudo)
+#   sudo ./install-mac.sh --uninstall # remove from /Library/Audio/Plug-Ins/CLAP/
 #
 # Standard CLAP search paths on macOS (per CLAP spec):
-#   ~/Library/Audio/Plug-Ins/CLAP/    per-user   (no sudo)
-#   /Library/Audio/Plug-Ins/CLAP/     system      (sudo)
+#   /Library/Audio/Plug-Ins/CLAP/     system      (sudo)  ← default, matches .pkg installer
+#   ~/Library/Audio/Plug-Ins/CLAP/    per-user    (no sudo)
 
 set -euo pipefail
 
@@ -21,11 +20,12 @@ USER_DEST="$HOME/Library/Audio/Plug-Ins/CLAP"
 SYSTEM_DEST="/Library/Audio/Plug-Ins/CLAP"
 
 # -- Parse arguments -----------------------------------------------------------
-SYSTEM=false
+SYSTEM=false   # default: per-user (no sudo needed), use --system for /Library/
 UNINSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
+        --user)      SYSTEM=false ;;
         --system)    SYSTEM=true ;;
         --uninstall) UNINSTALL=true ;;
         --help|-h)

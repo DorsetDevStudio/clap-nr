@@ -1379,8 +1379,6 @@ static bool mac_create_window(clap_nr_gui_s *g)
                                                       repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:g->render_timer forMode:NSRunLoopCommonModes];
 
-    NSLog(@"clap-nr: mac_create_window OK, DisplaySize=%.0fx%.0f",
-          io.DisplaySize.x, io.DisplaySize.y);
     return true;
 }
 

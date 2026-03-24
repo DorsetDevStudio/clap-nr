@@ -10,7 +10,7 @@
  * --------------------------------------------------------------------- */
 
 #define CLAP_NR_VERSION_MAJOR  1
-#define CLAP_NR_VERSION_MINOR  1
+#define CLAP_NR_VERSION_MINOR  2
 #define CLAP_NR_VERSION_PATCH  0
 
 /* Stringification helpers */

@@ -690,19 +690,20 @@
         <li>
           <div class="step-body">
             <strong>Download the macOS installer</strong>
-            <p>Click the <strong>Download</strong> button at the top of this page. Your browser will download a <code>.dmg</code> or <code>.pkg</code> installer file.</p>
+            <p>Click the <strong>Download</strong> button at the top of this page. Your browser will download a <code>.pkg</code> installer file.</p>
           </div>
         </li>
         <li>
           <div class="step-body">
             <strong>Open the installer</strong>
-            <p>Double-click the downloaded file. If macOS shows a security warning, go to <em>System Settings &rarr; Privacy &amp; Security</em> and click <em>Open Anyway</em>.</p>
+            <p>Double-click the downloaded <code>.pkg</code> file and follow the on-screen steps. macOS may ask for your administrator password to install the plugin system-wide.</p>
+            <p>If macOS shows a security warning, go to <em>System Settings &rarr; Privacy &amp; Security</em> and click <em>Open Anyway</em>.</p>
           </div>
         </li>
         <li>
           <div class="step-body">
             <strong>Complete the installation</strong>
-            <p>Follow the on-screen steps. The plugin will be installed to your user CLAP folder automatically - no administrator password is needed.</p>
+            <p>The plugin is installed to <code>/Library/Audio/Plug-Ins/CLAP/</code> and is available to all users on this Mac.</p>
           </div>
         </li>
         <li>
@@ -1142,8 +1143,7 @@ document.addEventListener('DOMContentLoaded', function () {
         btn.href        = relPage;
         btn.textContent = '\u2B07 Download';
         if (os === 'macos' || os === 'linux') {
-          meta.textContent = osLabels[os]
-            + ' \u2014 build from source. See releases page for details.';
+          meta.textContent = 'See the releases page for all downloads.';
         } else {
           meta.textContent = 'See the releases page for all downloads.';
         }

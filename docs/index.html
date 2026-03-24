@@ -414,6 +414,59 @@
       .os-tab-btn { padding: 10px 14px; font-size: 0.88rem; }
     }
 
+    /* -- AI for good banner ------------------------------------ */
+    .ai-banner {
+      background: linear-gradient(135deg, #0f1a2e 0%, #101c24 100%);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 28px 24px;
+    }
+
+    .ai-banner-inner {
+      max-width: 860px;
+      margin: 0 auto;
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+    }
+
+    .ai-banner-icon {
+      font-size: 2rem;
+      line-height: 1;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .ai-banner-body {}
+
+    .ai-banner-body .ai-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent2);
+      margin-bottom: 4px;
+    }
+
+    .ai-banner-body strong {
+      display: block;
+      font-size: 1rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+
+    .ai-banner-body p {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin: 0;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 520px) {
+      .ai-banner-inner { flex-direction: column; gap: 12px; }
+    }
+
     /* -- Derivative notice -------------------------------------- */
     .notice {
       background: var(--surface);
@@ -473,9 +526,26 @@
   </div>
   <p class="dl-meta" id="dl-meta"></p>
 
-  <p style="font-size:0.82rem; color:var(--muted); margin-top:10px;">This project makes deliberate and extensive use of AI code generation. Yes, it will smell like AI to a trained eye - but that's a tool choice, not a skill gap. The author has 40 years of programming experience.</p>
-
 </header>
+
+<!-- -- AI for good banner ----------------------------------------- -->
+<div class="ai-banner">
+  <div class="ai-banner-inner">
+    <div class="ai-banner-icon">&#x1F916;</div>
+    <div class="ai-banner-body">
+      <div class="ai-label">Built with AI - for the community</div>
+      <strong>AI-assisted by a professional - not a beginner wielding AI like a superpower they don't yet understand</strong>
+      <p>
+        This project makes deliberate, extensive use of AI code generation - and we make no apology for it.
+        clap-nr exists to give the amateur radio community free access to professional-grade noise reduction;
+        it is not a commercial clone of someone else's work.
+        Every algorithm is attributed, every upstream licence is honoured, and every line serves the community.
+        AI helped us build it faster - the experience, intent, and responsibility behind it are entirely human.
+        The author has 40 years of programming experience from C to PHP
+      </p>
+    </div>
+  </div>
+</div>
 
 <main>
 

@@ -264,6 +264,156 @@
     }
     .platform-pill.active { border-color: var(--accent2); color: var(--accent2); }
 
+    /* -- OS Tabs ------------------------------------------------ */
+    .os-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 2px solid var(--border);
+      margin-bottom: 0;
+    }
+
+    .os-tab-btn {
+      background: none;
+      border: none;
+      border-bottom: 3px solid transparent;
+      margin-bottom: -2px;
+      padding: 12px 28px;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--muted);
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .os-tab-btn:hover { color: var(--text); }
+
+    .os-tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .os-tab-panel {
+      display: none;
+      padding-top: 32px;
+    }
+
+    .os-tab-panel.active { display: block; }
+
+    /* -- Install step list -------------------------------------- */
+    .install-steps {
+      counter-reset: step;
+      list-style: none;
+      padding: 0;
+      margin: 24px 0 0;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .install-steps li {
+      counter-increment: step;
+      display: flex;
+      gap: 18px;
+      align-items: flex-start;
+    }
+
+    .install-steps li::before {
+      content: counter(step);
+      flex-shrink: 0;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 2px;
+    }
+
+    .install-steps li .step-body { flex: 1; }
+    .install-steps li .step-body strong { color: #fff; font-size: 1rem; }
+    .install-steps li .step-body p { margin: 4px 0 0; font-size: 0.93rem; color: var(--muted); }
+    .install-steps li .step-body p:last-child { margin-bottom: 0; }
+
+    /* -- Screenshot block --------------------------------------- */
+    .screenshot-block {
+      margin: 28px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .screenshot-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      text-align: center;
+    }
+
+    .screenshot-wrap img {
+      max-width: 100%;
+      display: block;
+      margin: 0 auto;
+    }
+
+    .screenshot-wrap .caption {
+      font-size: 0.82rem;
+      color: var(--muted);
+      padding: 8px 14px 10px;
+      border-top: 1px solid var(--border);
+    }
+
+    /* -- "Build from source" details block ---------------------- */
+    .dev-details {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      margin-top: 16px;
+    }
+
+    .dev-details summary {
+      background: var(--surface);
+      padding: 14px 18px;
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--text);
+      font-size: 0.95rem;
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .dev-details summary::-webkit-details-marker { display: none; }
+
+    .dev-details summary::before {
+      content: "\25B6";
+      font-size: 0.7rem;
+      color: var(--muted);
+      transition: transform 0.2s;
+      display: inline-block;
+    }
+
+    .dev-details[open] summary::before { transform: rotate(90deg); }
+
+    .dev-details .dev-content {
+      padding: 24px 22px;
+      border-top: 1px solid var(--border);
+    }
+
+    /* -- Responsive tab adjustments ----------------------------- */
+    @media (max-width: 480px) {
+      .os-tab-btn { padding: 10px 14px; font-size: 0.88rem; }
+    }
+
     /* -- Derivative notice -------------------------------------- */
     .notice {
       background: var(--surface);
@@ -359,6 +509,245 @@
       This plugin is not standalone - it must be loaded by a host application
       that supports the CLAP plugin format.
     </p>
+  </section>
+
+  <!-- Install - tabbed OS guide -->
+  <section id="install">
+    <h2>Get clap-nr</h2>
+    <p>Select your operating system below for step-by-step installation instructions.</p>
+
+    <!-- Tab bar -->
+    <div class="os-tabs" role="tablist">
+      <button class="os-tab-btn active" role="tab" aria-selected="true"
+              aria-controls="tab-windows" id="tabbtn-windows"
+              onclick="switchTab('windows')">
+        &#x1F5A5; Windows
+      </button>
+      <button class="os-tab-btn" role="tab" aria-selected="false"
+              aria-controls="tab-macos" id="tabbtn-macos"
+              onclick="switchTab('macos')">
+        &#xF8FF; macOS
+      </button>
+      <button class="os-tab-btn" role="tab" aria-selected="false"
+              aria-controls="tab-linux" id="tabbtn-linux"
+              onclick="switchTab('linux')">
+        &#x1F427; Linux
+      </button>
+    </div>
+
+    <!-- Windows tab -->
+    <div class="os-tab-panel active" id="tab-windows" role="tabpanel"
+         aria-labelledby="tabBtn-windows">
+
+      <div class="screenshot-block">
+        <div class="screenshot-wrap">
+          <img src="img/NR0-tab-active-in-front-of-station-master-scope.png"
+               alt="clap-nr NR0 tab shown active inside Station Master Pro" />
+          <div class="caption">clap-nr loaded inside Station Master Pro - NR0 auto-notch tab active</div>
+        </div>
+        <div class="screenshot-wrap">
+          <img src="img/NR0-tab-plugin-window-only.png"
+               alt="clap-nr plugin window standalone view" />
+          <div class="caption">The clap-nr plugin window - NR0 auto-notch controls</div>
+        </div>
+      </div>
+
+      <ol class="install-steps">
+        <li>
+          <div class="step-body">
+            <strong>Download the Windows installer</strong>
+            <p>Click the <strong>Download</strong> button at the top of this page. Your browser will download a <code>.exe</code> installer file.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Run the installer</strong>
+            <p>Double-click the downloaded <code>.exe</code> file. Windows may show a security prompt - click <em>More info</em> then <em>Run anyway</em> to continue.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Follow the setup wizard</strong>
+            <p>Click through the setup steps. The installer handles everything - no manual file copying required.</p>
+            <div class="screenshot-block" style="margin-top:14px;">
+              <div class="screenshot-wrap">
+                <img src="img/windows-installer-screen-ready-to-install.png"
+                     alt="Windows installer ready-to-install screen" />
+                <div class="caption">Installer ready to install - click Install to continue</div>
+              </div>
+              <div class="screenshot-wrap">
+                <img src="img/windows-installer-screen-completed.png"
+                     alt="Windows installer completed screen" />
+                <div class="caption">Installation complete</div>
+              </div>
+            </div>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Open your host application</strong>
+            <p>Start Station Master Pro (or any CLAP-compatible host). The plugin will appear as <strong>clap-nr</strong> in the plugin list.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Load clap-nr and select a noise-reduction mode</strong>
+            <p>Add the plugin to your audio chain, choose a noise-reduction tab (NR1 through NR4, or NR0 for the auto-notch), and adjust the controls to suit your signal.</p>
+          </div>
+        </li>
+      </ol>
+
+      <p style="margin-top:24px; font-size:0.9rem; color:var(--muted);">
+        <strong style="color:var(--text);">To uninstall:</strong> Open <em>Add or remove programs</em> in Windows Settings, search for <em>clap-nr</em>, and click <em>Uninstall</em>.
+      </p>
+    </div>
+
+    <!-- macOS tab -->
+    <div class="os-tab-panel" id="tab-macos" role="tabpanel"
+         aria-labelledby="tabBtn-macos">
+
+      <div class="screenshot-block">
+        <div class="screenshot-wrap">
+          <img src="img/NR0-tab-plugin-window-only.png"
+               alt="clap-nr plugin window" />
+          <div class="caption">The clap-nr plugin window - NR0 auto-notch controls</div>
+        </div>
+      </div>
+
+      <ol class="install-steps">
+        <li>
+          <div class="step-body">
+            <strong>Download the macOS installer</strong>
+            <p>Click the <strong>Download</strong> button at the top of this page. Your browser will download a <code>.dmg</code> or <code>.pkg</code> installer file.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Open the installer</strong>
+            <p>Double-click the downloaded file. If macOS shows a security warning, go to <em>System Settings &rarr; Privacy &amp; Security</em> and click <em>Open Anyway</em>.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Complete the installation</strong>
+            <p>Follow the on-screen steps. The plugin will be installed to your user CLAP folder automatically - no administrator password is needed.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Open your host application</strong>
+            <p>Start your CLAP-compatible host. The plugin will appear as <strong>clap-nr</strong> in the plugin list.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Load clap-nr and select a noise-reduction mode</strong>
+            <p>Add the plugin to your audio chain, choose a noise-reduction tab (NR1 through NR4, or NR0 for the auto-notch), and adjust the controls to suit your signal.</p>
+          </div>
+        </li>
+      </ol>
+
+      <p style="margin-top:24px; font-size:0.9rem; color:var(--muted);">
+        Supported on <strong style="color:var(--text);">Apple Silicon (M1 / M2 / M3)</strong>.
+      </p>
+    </div>
+
+    <!-- Linux tab -->
+    <div class="os-tab-panel" id="tab-linux" role="tabpanel"
+         aria-labelledby="tabBtn-linux">
+
+      <div class="screenshot-block">
+        <div class="screenshot-wrap">
+          <img src="img/NR0-tab-plugin-window-only.png"
+               alt="clap-nr plugin window" />
+          <div class="caption">The clap-nr plugin window - NR0 auto-notch controls</div>
+        </div>
+      </div>
+
+      <ol class="install-steps">
+        <li>
+          <div class="step-body">
+            <strong>Download the Linux package</strong>
+            <p>Click the <strong>Download</strong> button at the top of this page to download the Linux package for your distribution.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Install the package</strong>
+            <p>On Debian / Ubuntu, open a terminal and run:</p>
+            <pre><code>sudo dpkg -i clap-nr-*.deb</code></pre>
+            <p>On Fedora / RHEL, run:</p>
+            <pre><code>sudo rpm -i clap-nr-*.rpm</code></pre>
+            <p>The plugin is installed to <code>/usr/lib/clap/</code> (system) or follow the prompts for a user install.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Open your host application</strong>
+            <p>Start your CLAP-compatible host. The plugin will appear as <strong>clap-nr</strong> in the plugin list.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Load clap-nr and select a noise-reduction mode</strong>
+            <p>Add the plugin to your audio chain, choose a noise-reduction tab (NR1 through NR4, or NR0 for the auto-notch), and adjust the controls to suit your signal.</p>
+          </div>
+        </li>
+      </ol>
+
+      <p style="margin-top:24px; font-size:0.9rem; color:var(--muted);">
+        Supported on <strong style="color:var(--text);">x64 (AMD64)</strong> Linux distributions.
+      </p>
+    </div>
+
+    <!-- Developer: build from source -->
+    <details class="dev-details" style="margin-top: 48px;" id="building">
+      <summary>&#x1F6E0; Developer: build and install from source</summary>
+      <div class="dev-content">
+        <p style="color:var(--muted); font-size:0.93rem; margin-bottom:20px;">
+          These instructions are for developers who want to compile clap-nr from the
+          <a href="https://github.com/DorsetDevStudio/clap-nr">source repository</a>.
+          Regular users should use the installer above.
+        </p>
+
+        <h3>Windows (x64)</h3>
+        <p>Requires: Git, CMake 3.20+, Visual Studio 2022 with the <strong>Desktop development with C++</strong> workload.</p>
+        <p><strong>Build:</strong></p>
+<pre><code>build-win.bat</code></pre>
+        <p>Output: <code>build\Release\clap-nr.clap</code></p>
+        <p><strong>Install</strong> (run as Administrator):</p>
+<pre><code>install-win.bat</code></pre>
+        <p>Installs to <code>%CommonProgramFiles%\CLAP\</code>. Right-click the script in File Explorer and choose <em>Run as administrator</em>.</p>
+        <p><strong>Uninstall</strong> (run as Administrator):</p>
+<pre><code>uninstall.bat</code></pre>
+
+        <h3>macOS (Apple Silicon, arm64)</h3>
+        <p>Requires: Xcode Command Line Tools, CMake 3.20+.</p>
+<pre><code>xcode-select --install   # one-time, if not already done
+brew install cmake       # or download from cmake.org
+
+bash build-mac.sh</code></pre>
+        <p>Output: <code>build-mac/clap-nr.clap</code></p>
+        <p><strong>Install</strong> (user install, no password required):</p>
+<pre><code>bash install-mac.sh</code></pre>
+        <p>Installs to <code>~/Library/Audio/Plug-Ins/CLAP/</code>.</p>
+
+        <h3>Linux (x64)</h3>
+        <p>Requires: GCC/Clang, CMake 3.20+, standard build tools.</p>
+<pre><code># Debian / Ubuntu
+sudo apt install build-essential cmake git
+
+# Fedora / RHEL
+sudo dnf install gcc gcc-c++ cmake git
+
+bash build-linux.sh</code></pre>
+        <p>Output: <code>build-linux/clap-nr.clap</code></p>
+        <p><strong>User install</strong> (no root, installs to <code>~/.clap/</code>):</p>
+<pre><code>bash install-linux.sh</code></pre>
+        <p><strong>System-wide install</strong> (installs to <code>/usr/lib/clap/</code>):</p>
+<pre><code>bash install-linux.sh --system</code></pre>
+      </div>
+    </details>
   </section>
 
   <!-- Noise-reduction modes -->
@@ -478,48 +867,6 @@
     </p>
   </section>
 
-  <!-- Building -->
-  <section id="building">
-    <h2>Building and installing from source</h2>
-
-    <h3>Windows (x64)</h3>
-    <p>Requires: Git, CMake 3.20+, Visual Studio 2022 with the <strong>Desktop development with C++</strong> workload.</p>
-    <p><strong>Build:</strong></p>
-<pre><code>build-win.bat</code></pre>
-    <p>Output: <code>build\Release\clap-nr.clap</code></p>
-    <p><strong>Install</strong> (run as Administrator):</p>
-<pre><code>install-win.bat</code></pre>
-    <p>Installs to <code>%CommonProgramFiles%\CLAP\</code>. Right-click the script in File Explorer and choose <em>Run as administrator</em>.</p>
-    <p><strong>Uninstall</strong> (run as Administrator):</p>
-<pre><code>uninstall.bat</code></pre>
-
-    <h3>macOS (Apple Silicon, arm64)</h3>
-    <p>Requires: Xcode Command Line Tools, CMake 3.20+.</p>
-<pre><code>xcode-select --install   # one-time, if not already done
-brew install cmake       # or download from cmake.org
-
-bash build-mac.sh</code></pre>
-    <p>Output: <code>build-mac/clap-nr.clap</code></p>
-    <p><strong>Install</strong> (user install, no password required):</p>
-<pre><code>bash install-mac.sh</code></pre>
-    <p>Installs to <code>~/Library/Audio/Plug-Ins/CLAP/</code>.</p>
-
-    <h3>Linux (x64)</h3>
-    <p>Requires: GCC/Clang, CMake 3.20+, standard build tools.</p>
-<pre><code># Debian / Ubuntu
-sudo apt install build-essential cmake git
-
-# Fedora / RHEL
-sudo dnf install gcc gcc-c++ cmake git
-
-bash build-linux.sh</code></pre>
-    <p>Output: <code>build-linux/clap-nr.clap</code></p>
-    <p><strong>User install</strong> (no root, installs to <code>~/.clap/</code>):</p>
-<pre><code>bash install-linux.sh</code></pre>
-    <p><strong>System-wide install</strong> (installs to <code>/usr/lib/clap/</code>):</p>
-<pre><code>bash install-linux.sh --system</code></pre>
-  </section>
-
   <!-- Licence -->
   <section id="licence">
     <h2>Licence</h2>
@@ -619,6 +966,34 @@ bash build-linux.sh</code></pre>
 </body>
 
 <script>
+// ---------------------------------------------------------------------------
+// OS tab switcher
+// ---------------------------------------------------------------------------
+function switchTab(os) {
+  var panels = document.querySelectorAll('.os-tab-panel');
+  var buttons = document.querySelectorAll('.os-tab-btn');
+  for (var i = 0; i < panels.length; i++) {
+    panels[i].classList.remove('active');
+    buttons[i].classList.remove('active');
+    buttons[i].setAttribute('aria-selected', 'false');
+  }
+  var panel = document.getElementById('tab-' + os);
+  var btn   = document.getElementById('tabbtn-' + os);
+  if (panel) panel.classList.add('active');
+  if (btn)   { btn.classList.add('active'); btn.setAttribute('aria-selected', 'true'); }
+}
+
+// Auto-select tab based on visitor OS (reuses detectOS below)
+document.addEventListener('DOMContentLoaded', function () {
+  var ua = (navigator.userAgent || '').toLowerCase();
+  var pl = (navigator.platform  || '').toLowerCase();
+  var os;
+  if (pl.indexOf('win') !== -1 || ua.indexOf('windows') !== -1) os = 'windows';
+  else if (pl.indexOf('mac') !== -1 || ua.indexOf('macintosh') !== -1) os = 'macos';
+  else if (ua.indexOf('linux') !== -1) os = 'linux';
+  if (os && os !== 'windows') switchTab(os); // windows is already the default
+});
+
 // ---------------------------------------------------------------------------
 // Auto-detect OS and fetch the matching asset from the latest GitHub release.
 // Falls back gracefully to the releases page if no matching asset is found

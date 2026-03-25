@@ -318,6 +318,30 @@ else
 fi
 
 # -----------------------------------------------------------------------
+# 11. Notarise and staple the final .pkg
+#     Gatekeeper checks the .pkg wrapper itself, not just the bundle inside.
+#     We must submit the signed .pkg to the notary service and staple the
+#     ticket to it so spctl --assess --type install passes offline.
+# -----------------------------------------------------------------------
+if [[ "$DO_SIGN" == true ]]; then
+    echo ""
+    echo "Submitting .pkg to Apple notary service..."
+    xcrun notarytool submit "$PKG_FINAL" \
+        --keychain-profile "$NOTARY_PROFILE" \
+        --wait
+
+    echo ""
+    echo "Stapling notarisation ticket to .pkg..."
+    xcrun stapler staple "$PKG_FINAL"
+    echo "Notarised and stapled .pkg OK."
+
+    echo ""
+    echo "Verifying Gatekeeper acceptance..."
+    spctl --assess --type install --verbose "$PKG_FINAL" 2>&1 && \
+        echo "Gatekeeper: ACCEPTED" || echo "WARNING: Gatekeeper assessment failed"
+fi
+
+# -----------------------------------------------------------------------
 # Done
 # -----------------------------------------------------------------------
 echo ""

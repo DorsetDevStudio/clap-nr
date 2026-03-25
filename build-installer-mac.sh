@@ -120,6 +120,81 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" <<PLIST
 PLIST
 
 # -----------------------------------------------------------------------
+# 6b. Bundle third-party dylibs into Contents/Frameworks/
+#     The plugin links against fftw3, rnnoise, and libspecbleach from
+#     Homebrew.  End-user machines don't have Homebrew, so we embed the
+#     dylibs in the bundle and rewrite all load paths to be self-contained.
+#     (Analogous to the Windows installer copying its DLLs alongside the
+#     plugin -- see the Windows CMakeLists install() block.)
+# -----------------------------------------------------------------------
+echo ""
+echo "Bundling third-party dylibs..."
+FRAMEWORKS_DIR="$BUNDLE_DIR/Contents/Frameworks"
+mkdir -p "$FRAMEWORKS_DIR"
+
+PLUGIN_BINARY="$BINARY_DIR/clap-nr"
+
+# Let the plugin binary find its bundled dylibs via @rpath
+install_name_tool -add_rpath "@loader_path/../Frameworks" "$PLUGIN_BINARY"
+
+# List the non-system dylib paths referenced by a binary.
+# Skips /usr/lib/*, /System/*, and any @-prefixed entries (already relative).
+_nonsy_deps() {
+    otool -L "$1" | awk 'NR>1{print $1}' | while IFS= read -r dep; do
+        case "$dep" in @*|/usr/lib/*|/System/*) continue ;; esac
+        [[ -f "$dep" ]] && printf '%s\n' "$dep"
+    done
+}
+
+# Copy a dylib into Contents/Frameworks/ (once) and rewrite the calling
+# binary's LC_LOAD_DYLIB entry to use @rpath so it is location-independent.
+_embed_dylib() {
+    local dep="$1" patcher="$2"
+    local name; name=$(basename "$dep")
+    local dest="$FRAMEWORKS_DIR/$name"
+    if [[ ! -f "$dest" ]]; then
+        echo "  + $name"
+        cp "$dep" "$dest"
+        chmod u+w "$dest"
+        # Self-identify as @rpath-relative so peers can reference it the same way
+        install_name_tool -id "@rpath/$name" "$dest"
+    fi
+    install_name_tool -change "$dep" "@rpath/$name" "$patcher" 2>/dev/null || true
+}
+
+# Pass 1: direct deps of the plugin binary (fftw3, rnnoise, libspecbleach)
+while IFS= read -r dep; do
+    _embed_dylib "$dep" "$PLUGIN_BINARY"
+done < <(_nonsy_deps "$PLUGIN_BINARY")
+
+# Pass 2: transitive deps of the bundled dylibs
+# (e.g. libspecbleach.dylib may reference libfftw3.3.dylib)
+# Give each bundled dylib an @rpath pointing to its own directory so the
+# dynamic linker resolves peer dylibs from Frameworks/ at runtime.
+for bundled in "$FRAMEWORKS_DIR"/*.dylib; do
+    install_name_tool -add_rpath "@loader_path" "$bundled" 2>/dev/null || true
+    while IFS= read -r dep; do
+        _embed_dylib "$dep" "$bundled"
+    done < <(_nonsy_deps "$bundled")
+done
+
+# Sanity check: no non-system references should remain unresolved
+echo ""
+echo "Verifying bundle is self-contained..."
+_bad=0
+for _bin in "$PLUGIN_BINARY" "$FRAMEWORKS_DIR"/*.dylib; do
+    while IFS= read -r dep; do
+        echo "  ERROR: unresolved dep in $(basename "$_bin"): $dep"
+        _bad=$((_bad + 1))
+    done < <(_nonsy_deps "$_bin")
+done
+if [[ $_bad -gt 0 ]]; then
+    echo "ERROR: $_bad external dylib reference(s) remain -- stopping."
+    exit 1
+fi
+echo "Bundle is self-contained."
+
+# -----------------------------------------------------------------------
 # 7. Code-sign the bundle
 # -----------------------------------------------------------------------
 if [[ "$DO_SIGN" == true ]]; then

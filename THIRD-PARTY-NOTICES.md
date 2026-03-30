@@ -15,7 +15,7 @@ Files: `src/nr/anr.c`, `src/nr/anr.h`, `src/nr/emnr.c`, `src/nr/emnr.h`,
 Copyright (C) 2012, 2013, 2015, 2024, 2025 Warren Pratt, NR0V
 <warren@wpratt.com> / <warren@pratt.one>
 
-Original source: https://github.com/vu3rdd/wdsp (and related radio DSP
+Original source: https://github.com/NR0V/wdsp (and related radio DSP
 projects by Warren Pratt).
 
 These files are distributed here under the same licence terms under which
@@ -32,7 +32,7 @@ Files: `src/nr/rnnr.c`, `src/nr/rnnr.h`, `src/nr/sbnr.c`, `src/nr/sbnr.h`
 Copyright (C) 2000–2025 Original authors  
 Copyright (C) 2020–2025 Richard Samphire, MW0LGE <mw0lge@grange-lane.co.uk>
 
-Based on code and ideas from: https://github.com/vu3rdd/wdsp
+Based on code and ideas from: https://github.com/ramdor/Thetis
 
 These files are distributed here under the same licence terms under which
 they were received — GNU General Public License version 2 (or, at your

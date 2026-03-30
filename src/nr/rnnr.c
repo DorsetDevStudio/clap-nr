@@ -90,6 +90,10 @@ static int _rnnr_capacity = 0;
 // the model to use when creating new RNNR instances
 static RNNModel* _rnnr_model = NULL;
 
+// serialises RNNRloadModel so that concurrent or rapid calls cannot race
+static NR_MUTEX _rnnr_load_cs;
+static int      _rnnr_load_cs_inited = 0;
+
 //ringbuffer
 static void ring_buffer_init(rnnr_ring_buffer* rb, int capacity) 
 {
@@ -218,6 +222,10 @@ RNNR create_rnnr(int run, int position, int size, double* in, double* out, int r
         nr_aligned_free(_rnnr_instances);
         _rnnr_instances = tmp;
         _rnnr_capacity = new_cap;
+        if (!_rnnr_load_cs_inited) {
+            NR_MUTEX_INIT(_rnnr_load_cs);
+            _rnnr_load_cs_inited = 1;
+        }
     }
     _rnnr_instances[_rnnr_count++] = a;
     //
@@ -227,14 +235,33 @@ RNNR create_rnnr(int run, int position, int size, double* in, double* out, int r
 
 void xrnnr(RNNR a, int pos)
 {
-    if (a->st && a->run && pos == a->position)
+    /* Position check does not need the mutex - position never changes at runtime. */
+    if (pos != a->position)
+    {
+        if (a->out != a->in)
+            memcpy(a->out, a->in, a->buffer_size * sizeof(complex));
+        return;
+    }
+
+    /* Lock first, THEN read a->st and a->run.  Reading them outside the mutex
+     * was a TOCTOU race: RNNRloadModel() can destroy a->st between the check
+     * and the rnnoise_process_frame() call, leaving a dangling pointer. */
+    NR_MUTEX_LOCK(a->cs);
+
+    if (!a->st || !a->run)
+    {
+        NR_MUTEX_UNLOCK(a->cs);
+        if (a->out != a->in)
+            memcpy(a->out, a->in, a->buffer_size * sizeof(complex));
+        return;
+    }
+
     {
         int  bs = a->buffer_size;
         int  fs = a->frame_size;
         float* to_process = a->to_process_buffer;
         float* process_out = a->processed_output_buffer;
 
-        NR_MUTEX_LOCK(a->cs);
         for (int i = 0; i < bs; i++)
         {
             ring_buffer_put(&a->input_ring, (float)a->in[2 * i + 0]);
@@ -287,10 +314,6 @@ void xrnnr(RNNR a, int pos)
             memcpy(a->out, a->in, a->buffer_size * sizeof(complex));
         }
     }
-    else if (a->out != a->in)
-    {
-        memcpy(a->out, a->in, a->buffer_size * sizeof(complex));
-    }
 }
 
 void destroy_rnnr(RNNR a) 
@@ -323,6 +346,10 @@ void destroy_rnnr(RNNR a)
         nr_aligned_free(_rnnr_instances);
         _rnnr_instances = NULL;
         _rnnr_capacity = 0;
+        if (_rnnr_load_cs_inited) {
+            NR_MUTEX_DESTROY(_rnnr_load_cs);
+            _rnnr_load_cs_inited = 0;
+        }
     }
 }
 
@@ -331,7 +358,15 @@ PORT
 #endif
 void RNNRloadModel(const char* file_path)
 {
-    // destroy any in use
+    /* Serialise concurrent callers.  The main caller (clap_nr.c) now routes
+     * all model changes through plugin_on_main_thread so concurrent calls
+     * should not occur in normal use -- but this mutex is the safety net. */
+    if (_rnnr_load_cs_inited) NR_MUTEX_LOCK(_rnnr_load_cs);
+
+    // Stop all instances and destroy their DenoiseState.
+    // a->st is nulled immediately after destroy so that any thread
+    // that reads it outside the mutex (before this fix propagates) sees
+    // NULL rather than a dangling pointer.
     for (int i = 0; i < _rnnr_count; i++)
     {
         RNNR a = _rnnr_instances[i];
@@ -339,6 +374,7 @@ void RNNRloadModel(const char* file_path)
         a->run_old = a->run;
         a->run = 0;
         rnnoise_destroy(a->st);
+        a->st = NULL;
         NR_MUTEX_UNLOCK(a->cs);
     }
 
@@ -356,15 +392,22 @@ void RNNRloadModel(const char* file_path)
         _rnnr_model = rnnoise_model_from_filename(file_path);
     }
 
-    // recreate any we had created previously and restart if needed
+    // Recreate DenoiseState with the new model and flush ring buffers so
+    // stale frames from the old model do not feed into the new one.
     for (int i = 0; i < _rnnr_count; i++)
     {
         RNNR a = _rnnr_instances[i];
         NR_MUTEX_LOCK(a->cs);
         a->st = rnnoise_create(_rnnr_model);
         a->run = a->run_old;
+        // Flush any buffered audio to avoid stale frames at the new model
+        a->input_ring.head  = a->input_ring.tail  = a->input_ring.count  = 0;
+        a->output_ring.head = a->output_ring.tail = a->output_ring.count = 0;
+        rnnr_agc_init(a);
         NR_MUTEX_UNLOCK(a->cs);
     }
+
+    if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
 }
 
 #ifndef CLAP_NR_STANDALONE

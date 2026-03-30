@@ -217,7 +217,8 @@ typedef struct {
      * state is only ever modified from the audio thread, eliminating
      * the race between the GUI/main thread and the audio thread. */
     bool params_dirty;
-    bool nr3_model_dirty;  /* set when nr3_model changes; triggers RNNRloadModel */
+    bool nr3_model_dirty;      /* set when nr3_model changes; triggers RNNRloadModel */
+    bool nr3_callback_pending; /* request_callback already outstanding; skip duplicates */
 
     /* True between a successful activate() and the subsequent deactivate().
      * process() checks this flag and does passthrough if false, guarding
@@ -501,14 +502,21 @@ static void on_gui_param_change(void *plugin_ptr, clap_id param_id, double value
     if (param_id < PARAM_COUNT)
         self->param_dirty[param_id] = true;
 
-    /* NR3 model loading reads a file (rnnoise_model_from_filename).  Do it
-     * here on the main thread so the audio thread is never blocked by I/O.
-     * handle_param_event already set nr3_model and nr3_model_dirty; clear
-     * the dirty flag so the audio-thread path (params_dirty block) won't
-     * also try to call request_callback for a no-op reload. */
+    /* NR3 model loading reads a file (rnnoise_model_from_filename).  Do not
+     * call apply_nr3_model() synchronously here -- each click would block the
+     * main thread for the full file-read duration, and rapid clicks (e.g.
+     * Default -> Small -> Large) would queue up N sequential loads that
+     * freeze the UI for several seconds.
+     *
+     * Instead, keep nr3_model_dirty=true and schedule a main-thread callback.
+     * By the time plugin_on_main_thread() fires, self->nr3_model already holds
+     * the FINAL selected value, so only one load ever happens regardless of
+     * how many times the user clicked. */
     if (param_id == PARAM_NR3_MODEL) {
-        apply_nr3_model(self);
-        self->nr3_model_dirty = false;
+        if (!self->nr3_callback_pending) {
+            self->nr3_callback_pending = true;
+            self->host->request_callback(self->host);
+        }
     }
 
     /* Ask the host to call params_flush so it records the new value */
@@ -975,8 +983,10 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
              * handler knows work is pending.
              * Guard with active: if deactivate/stop_processing already cleared
              * the flag, calling back into the host during teardown can crash. */
-            if (self->active)
+            if (self->active && !self->nr3_callback_pending) {
+                self->nr3_callback_pending = true;
                 self->host->request_callback(self->host);
+            }
         }
         self->params_dirty = false;
     }
@@ -1842,8 +1852,11 @@ static void plugin_on_main_thread(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
     /* Apply any NR3 model change that was deferred from the audio thread
-     * (host automation of PARAM_NR3_MODEL).  File I/O is safe here. */
+     * (host automation of PARAM_NR3_MODEL).  File I/O is safe here.
+     * Clear pending BEFORE the load so that any click that arrives while
+     * the file is being read queues a fresh callback for that new value. */
     if (self->nr3_model_dirty) {
+        self->nr3_callback_pending = false;
         apply_nr3_model(self);
         self->nr3_model_dirty = false;
     }

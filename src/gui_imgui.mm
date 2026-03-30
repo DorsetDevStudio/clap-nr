@@ -216,6 +216,11 @@ struct clap_nr_gui_s {
     float  nr4_reduction;
     int    nr3_model;
     float  nr3_strength;
+    /* Debounce for NR3 model radio buttons: timestamp (ImGui time, seconds)
+     * of the last model selection.  Buttons are disabled for
+     * NR3_MODEL_DEBOUNCE_SECS after each click so that rapid switching
+     * cannot queue multiple back-to-back model file loads. */
+    double nr3_model_fire_time;
     float  nr0_aggression;       /* 0.0-100.0 */
     int    nr0_max_notches;      /* 1-10       */
     float  nr0_threshold;        /* 3.0-40.0 dB above local floor */
@@ -665,15 +670,26 @@ static void render_frame(clap_nr_gui_s *g)
         };
         ImGui::TextUnformatted("Model:");
         ImGui::SameLine();
+        /* Disable buttons briefly after a switch to prevent queuing multiple
+         * back-to-back file loads.  1.5 s covers even a slow large-model read. */
+        static constexpr double NR3_MODEL_DEBOUNCE_SECS = 1.5;
+        const bool nr3_busy = (ImGui::GetTime() - g->nr3_model_fire_time) < NR3_MODEL_DEBOUNCE_SECS;
+        if (nr3_busy) ImGui::BeginDisabled();
         for (int i = 0; i < 3; ++i) {
             if (i > 0) ImGui::SameLine();
             ImGui::PushID(i);
             if (ImGui::RadioButton(model_labels[i], g->nr3_model == i) && !g->updating) {
                 g->nr3_model = i;
+                g->nr3_model_fire_time = ImGui::GetTime();
                 changed = true; param_id = _GUI_PARAM_NR3_MODEL; new_val = i;
             }
             show_tooltip_text(model_tips[i]);
             ImGui::PopID();
+        }
+        if (nr3_busy) {
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(loading...)");
         }
 
         ImGui::Spacing();
@@ -1528,6 +1544,7 @@ clap_nr_gui_t *gui_create(void *plugin, gui_param_cb_t on_param_change,
     g->nr4_reduction    = 10.0f;
     g->nr3_model        = 0;
     g->nr3_strength     = 0.5f;
+    g->nr3_model_fire_time = -9999.0;
     g->nr0_aggression   = 50.0f;
     g->nr0_max_notches  = 5;
     g->nr0_threshold    = 10.0f;

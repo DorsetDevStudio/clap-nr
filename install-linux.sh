@@ -4,8 +4,6 @@
 # Usage:
 #   ./install-linux.sh              # installs to ~/.clap/  (no sudo needed)
 #   ./install-linux.sh --system     # installs to /usr/lib/clap/  (requires sudo)
-#   ./install-linux.sh --uninstall  # removes ~/.clap/clap-nr.clap
-#   ./install-linux.sh --system --uninstall  # removes /usr/lib/clap/clap-nr.clap
 #
 # On Linux the plugin is a single self-contained .clap file.
 # All runtime libraries (fftw3, rnnoise, specbleach) are linked as system
@@ -27,18 +25,17 @@ SYSTEM_DEST="/usr/lib/clap"
 
 # -- Parse arguments -----------------------------------------------------------
 SYSTEM=false
-UNINSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
         --system)    SYSTEM=true ;;
-        --uninstall) UNINSTALL=true ;;
         --help|-h)
-            echo "Usage: $0 [--system] [--uninstall]"
+            echo "Usage: $0 [--system]"
             echo ""
             echo "  (no flags)   Install to ~/.clap/          (per-user, no sudo)"
             echo "  --system     Install to /usr/lib/clap/    (system-wide, requires sudo)"
-            echo "  --uninstall  Remove the plugin instead of installing"
+            echo ""
+            echo "To uninstall, use uninstall-linux.sh instead."
             exit 0 ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
@@ -56,18 +53,6 @@ else
     DEST="$USER_DEST"
 fi
 
-# -- Uninstall path ------------------------------------------------------------
-if [[ "$UNINSTALL" == true ]]; then
-    TARGET="$DEST/$PLUGIN_NAME"
-    if [[ -f "$TARGET" ]]; then
-        rm -f "$TARGET"
-        echo "Removed: $TARGET"
-    else
-        echo "Not installed at $TARGET -- nothing to remove."
-    fi
-    exit 0
-fi
-
 # -- Check the plugin has been built -------------------------------------------
 if [[ ! -f "$PLUGIN_SRC" ]]; then
     echo "ERROR: $PLUGIN_SRC not found."
@@ -78,6 +63,19 @@ fi
 # -- Install -------------------------------------------------------------------
 mkdir -p "$DEST"
 cp "$PLUGIN_SRC" "$DEST/$PLUGIN_NAME"
+
+# Copy RNNoise weights files alongside the plugin so NR3 small/large models work.
+# apply_nr3_model() uses dladdr() to find the binary path, then looks for the
+# .bin files in the same directory.
+WEIGHTS_SRC="$SCRIPT_DIR/libs/rnnoise"
+for f in rnnoise_weights_small.bin rnnoise_weights_large.bin; do
+    if [[ -f "$WEIGHTS_SRC/$f" ]]; then
+        cp "$WEIGHTS_SRC/$f" "$DEST/$f"
+    else
+        echo "WARNING: weights file not found: $WEIGHTS_SRC/$f"
+    fi
+done
+
 echo "Installed: $DEST/$PLUGIN_NAME"
 echo ""
 echo "You can now load the plugin in your CLAP host."

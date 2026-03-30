@@ -183,7 +183,7 @@ The Community edition is free.
 1. In the same Command Prompt window (still inside the `clap-nr` folder),
    type the following and press Enter:
    ```
-   build-win.bat
+   .\build-win.ps1
    ```
 2. You will see a lot of text scroll past. This is normal. Wait for it to
    finish. It should end with something like `Build succeeded`.
@@ -203,19 +203,17 @@ and that CMake was added to the PATH (Part 1, Step 2).
 The install script copies the plugin and its required support files to the
 standard Windows CLAP plugin folder so your host application can find it.
 
-**You must run this as Administrator.**
-
 1. Open **File Explorer** and navigate to the `clap-nr` folder.
-2. Right-click on **install-win.bat** and choose **Run as administrator**.
+2. Double-click on **install-win.ps1** to run it.
 3. If Windows asks "Do you want to allow this app to make changes to your
    device?", click **Yes**.
-4. A Command Prompt window will open and run the install. When it finishes
+4. A PowerShell window will open and run the install. When it finishes
    successfully you will see:
    ```
-   Installed to C:\Program Files\Common Files\CLAP
-   Press any key to continue . . .
+   SUCCESS: Plugin installed to C:\Program Files\Common Files\CLAP
+   Press Enter to exit
    ```
-5. Press any key to close the window.
+5. Press Enter to close the window.
 
 The plugin is now installed. Open your CLAP-compatible host application
 (for example, Station Master Pro) and it should appear in the plugin list.
@@ -227,16 +225,14 @@ You may need to trigger a plugin rescan inside the host.
 
 If you want to remove the plugin from your system:
 
-**You must run as Administrator.**
-
 1. Open **File Explorer** and navigate to the `clap-nr` folder.
-2. Right-click on **uninstall.bat** and choose **Run as administrator**.
+2. Double-click on **uninstall-win.ps1** to run it.
 3. If Windows asks "Do you want to allow this app to make changes to your
    device?", click **Yes**.
-4. A Command Prompt window will open. When it finishes you will see:
+4. A PowerShell window will open. When it finishes you will see:
    ```
-   Uninstalled from C:\Program Files\Common Files\CLAP
-   Press any key to continue . . .
+   SUCCESS: Removed 8 file(s) from C:\Program Files\Common Files\CLAP
+   Press Enter to exit
    ```
 5. Press any key to close the window.
 
@@ -383,13 +379,16 @@ clap-nr/
 ├-- LICENSE                  <- GNU GPL v2
 ├-- THIRD-PARTY-NOTICES.md   <- upstream copyright notices
 ├-- README.md
-├-- build-win.bat            <- Windows: configure and build
-├-- install-win.bat          <- Windows: install to %CommonProgramFiles%\CLAP  (run as Admin)
-├-- uninstall.bat            <- Windows: uninstall  (run as Admin)
+├-- build-win.ps1            <- Windows: configure and build
+├-- build-installer-win.ps1  <- Windows: build signed installer (requires Inno Setup)
+├-- install-win.ps1          <- Windows: install to %CommonProgramFiles%\CLAP  (auto-elevates)
+├-- uninstall-win.ps1        <- Windows: uninstall  (auto-elevates)
 ├-- build-mac.sh             <- macOS (arm64): configure and build
 ├-- install-mac.sh           <- macOS: install to ~/Library/Audio/Plug-Ins/CLAP/
+├-- uninstall-mac.sh         <- macOS: uninstall
 ├-- build-linux.sh           <- Linux (x64): configure and build
 ├-- install-linux.sh         <- Linux: install to ~/.clap/  or  /usr/lib/clap/
+├-- uninstall-linux.sh       <- Linux: uninstall
 ├-- include/
 │   └-- clap/                <- CLAP SDK headers (vendored, MIT licence)
 ├-- libs/
@@ -435,7 +434,7 @@ plugin useful.
 The core DSP noise-reduction algorithms (ANR and EMNR) originate from
 Warren's wdsp library, a high-quality DSP stack written for amateur radio
 software-defined radio applications.
-- https://github.com/vu3rdd/wdsp
+- https://github.com/NR0V/wdsp
 
 **Richard Samphire, MW0LGE** - `rnnr`, `sbnr`
 The RNNoise and libspecbleach integration (NR3 and NR4) was authored by

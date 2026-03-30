@@ -90,5 +90,16 @@ if [[ "$INSTALL" == true ]]; then
     CLAP_DIR="$HOME/.clap"
     mkdir -p "$CLAP_DIR"
     cp "$PLUGIN" "$CLAP_DIR/clap-nr.clap"
+    
+    # Copy RNNoise weights files alongside the plugin so NR3 small/large models work
+    WEIGHTS_SRC="$SCRIPT_DIR/libs/rnnoise"
+    for f in rnnoise_weights_small.bin rnnoise_weights_large.bin; do
+        if [[ -f "$WEIGHTS_SRC/$f" ]]; then
+            cp "$WEIGHTS_SRC/$f" "$CLAP_DIR/$f"
+        else
+            echo "WARNING: weights file not found: $WEIGHTS_SRC/$f"
+        fi
+    done
+    
     echo "Installed to: $CLAP_DIR/clap-nr.clap"
 fi

@@ -786,13 +786,13 @@
         <h3>Windows (x64)</h3>
         <p>Requires: Git, CMake 3.20+, Visual Studio 2022 with the <strong>Desktop development with C++</strong> workload.</p>
         <p><strong>Build:</strong></p>
-<pre><code>build-win.bat</code></pre>
+<pre><code>.\build-win.ps1</code></pre>
         <p>Output: <code>build\Release\clap-nr.clap</code></p>
-        <p><strong>Install</strong> (run as Administrator):</p>
-<pre><code>install-win.bat</code></pre>
-        <p>Installs to <code>%CommonProgramFiles%\CLAP\</code>. Right-click the script in File Explorer and choose <em>Run as administrator</em>.</p>
-        <p><strong>Uninstall</strong> (run as Administrator):</p>
-<pre><code>uninstall.bat</code></pre>
+        <p><strong>Install</strong> (automatically requests administrator privileges):</p>
+<pre><code>install-win.ps1</code></pre>
+        <p>Installs to <code>%CommonProgramFiles%\CLAP\</code>. Double-click the script in File Explorer.</p>
+        <p><strong>Uninstall</strong> (automatically requests administrator privileges):</p>
+<pre><code>uninstall-win.ps1</code></pre>
 
         <h3>macOS (Apple Silicon, arm64)</h3>
         <p>Requires: Xcode Command Line Tools, CMake 3.20+.</p>

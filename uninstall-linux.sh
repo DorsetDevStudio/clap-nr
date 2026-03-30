@@ -48,3 +48,12 @@ if [[ -f "$TARGET" ]]; then
 else
     echo "Not installed at $TARGET -- nothing to remove."
 fi
+
+# Also remove NR3 weights files if present
+for f in rnnoise_weights_small.bin rnnoise_weights_large.bin; do
+    BIN_FILE="$DEST/$f"
+    if [[ -f "$BIN_FILE" ]]; then
+        rm -f "$BIN_FILE"
+        echo "Removed: $BIN_FILE"
+    fi
+done

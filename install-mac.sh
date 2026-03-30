@@ -2,13 +2,12 @@
 # install-mac.sh  --  install clap-nr.clap on macOS (Apple Silicon / arm64)
 #
 # Usage:
-#   sudo ./install-mac.sh             # install to /Library/Audio/Plug-Ins/CLAP/  (system, default)
-#   ./install-mac.sh --user           # install to ~/Library/Audio/Plug-Ins/CLAP/ (per-user, no sudo)
-#   sudo ./install-mac.sh --uninstall # remove from /Library/Audio/Plug-Ins/CLAP/
+#   ./install-mac.sh              # install to ~/Library/Audio/Plug-Ins/CLAP/ (per-user, no sudo, default)
+#   ./install-mac.sh --system     # install to /Library/Audio/Plug-Ins/CLAP/  (system-wide, requires sudo)
 #
 # Standard CLAP search paths on macOS (per CLAP spec):
-#   /Library/Audio/Plug-Ins/CLAP/     system      (sudo)  ← default, matches .pkg installer
-#   ~/Library/Audio/Plug-Ins/CLAP/    per-user    (no sudo)
+#   /Library/Audio/Plug-Ins/CLAP/     system      (sudo)
+#   ~/Library/Audio/Plug-Ins/CLAP/    per-user    (no sudo)  ← default
 
 set -euo pipefail
 
@@ -21,19 +20,17 @@ SYSTEM_DEST="/Library/Audio/Plug-Ins/CLAP"
 
 # -- Parse arguments -----------------------------------------------------------
 SYSTEM=false   # default: per-user (no sudo needed), use --system for /Library/
-UNINSTALL=false
 
 for arg in "$@"; do
     case "$arg" in
-        --user)      SYSTEM=false ;;
         --system)    SYSTEM=true ;;
-        --uninstall) UNINSTALL=true ;;
         --help|-h)
-            echo "Usage: $0 [--system] [--uninstall]"
+            echo "Usage: $0 [--system]"
             echo ""
             echo "  (no flags)   Install to ~/Library/Audio/Plug-Ins/CLAP/  (per-user, no sudo)"
-            echo "  --system     Install to /Library/Audio/Plug-Ins/CLAP/   (system-wide, sudo)"
-            echo "  --uninstall  Remove the plugin instead of installing"
+            echo "  --system     Install to /Library/Audio/Plug-Ins/CLAP/   (system-wide, requires sudo)"
+            echo ""
+            echo "To uninstall, use uninstall-mac.sh instead."
             exit 0 ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
@@ -49,18 +46,6 @@ if [[ "$SYSTEM" == true ]]; then
     fi
 else
     DEST="$USER_DEST"
-fi
-
-# -- Uninstall path ------------------------------------------------------------
-if [[ "$UNINSTALL" == true ]]; then
-    TARGET="$DEST/$PLUGIN_NAME"
-    if [[ -e "$TARGET" ]]; then
-        rm -rf "$TARGET"
-        echo "Removed: $TARGET"
-    else
-        echo "Not installed at $TARGET -- nothing to remove."
-    fi
-    exit 0
 fi
 
 # -- Check the plugin has been built -------------------------------------------

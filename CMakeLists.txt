@@ -215,6 +215,8 @@ if(WIN32)
         "${FFTW_DIR}/libfftw3-3.dll"
         "${RNNOISE_DIR}/rnnoise.dll"
         "${SPECBLEACH_DIR}/specbleach.dll"
+        "${RNNOISE_DIR}/rnnoise_weights_small.bin"
+        "${RNNOISE_DIR}/rnnoise_weights_large.bin"
         DESTINATION .
     )
 endif()

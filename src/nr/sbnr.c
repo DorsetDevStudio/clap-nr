@@ -25,7 +25,7 @@ The author can be reached by email at
 
 mw0lge@grange-lane.co.uk
 
-This code is based on code and ideas from  : https://github.com/vu3rdd/wdsp
+This code is based on code and ideas from  : https://github.com/NR0V/wdsp
 and and uses libspecbleach
 https://github.com/lucianodato/libspecbleach
 */

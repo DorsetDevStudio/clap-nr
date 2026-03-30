@@ -3,7 +3,7 @@
 ; Installs the clap-nr CLAP plugin and its runtime DLLs into the standard
 ; Windows CLAP location:  %CommonProgramFiles%\CLAP
 ;
-; Build this with build-installer.bat, which also handles code-signing.
+; Build this with build-installer-win.ps1, which also handles code-signing.
 ; Do NOT call ISCC directly if you want signed output.
 ;
 ; --------------------------------------------------------------------------
@@ -12,7 +12,7 @@
 ; --------------------------------------------------------------------------
 
 #define AppName      "clap-nr"
-; AppVersion is injected by build-installer.bat via /DAppVersion=x.y.z
+; AppVersion is injected by build-installer-win.ps1 via /DAppVersion=x.y.z
 ; If calling ISCC directly, pass /DAppVersion=1.2.3 on the command line.
 #ifndef AppVersion
   #define AppVersion "0.0.0"

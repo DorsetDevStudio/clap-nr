@@ -18,10 +18,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build-linux"
 PLUGIN_NAME="clap-nr.clap"
 
-# Extract version from version.h
+# Extract version from version.h (version is defined as separate MAJOR/MINOR/PATCH macros)
 VERSION_FILE="$SCRIPT_DIR/src/version.h"
 if [[ -f "$VERSION_FILE" ]]; then
-    VERSION=$(grep -oP '#define\s+CLAP_NR_VERSION\s+"\K[^"]+' "$VERSION_FILE" || echo "unknown")
+    _MAJOR=$(grep -oP '#define\s+CLAP_NR_VERSION_MAJOR\s+\K[0-9]+' "$VERSION_FILE" || echo "")
+    _MINOR=$(grep -oP '#define\s+CLAP_NR_VERSION_MINOR\s+\K[0-9]+' "$VERSION_FILE" || echo "")
+    _PATCH=$(grep -oP '#define\s+CLAP_NR_VERSION_PATCH\s+\K[0-9]+' "$VERSION_FILE" || echo "")
+    if [[ -n "$_MAJOR" && -n "$_MINOR" && -n "$_PATCH" ]]; then
+        VERSION="$_MAJOR.$_MINOR.$_PATCH"
+    else
+        VERSION="unknown"
+    fi
 else
     VERSION="unknown"
 fi

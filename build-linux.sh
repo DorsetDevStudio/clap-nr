@@ -39,12 +39,26 @@ done
 
 # -- Check required libraries -------------------------------------------------
 echo "Checking dependencies..."
+
+# Detect whether the bundled static libs are present so we can skip
+# the system pkg-config checks for libraries that are already bundled.
+LINUX_STATIC_DIR="$SCRIPT_DIR/libs/linux-static"
+HAS_BUNDLED_RNNOISE=false
+HAS_BUNDLED_SPECBLEACH=false
+[[ -f "$LINUX_STATIC_DIR/lib/librnnoise.a" ]] && HAS_BUNDLED_RNNOISE=true
+# specbleach may be installed under the arch sub-dir (lib/x86_64-linux-gnu/)
+for candidate in \
+    "$LINUX_STATIC_DIR/lib/libspecbleach.a" \
+    "$LINUX_STATIC_DIR/lib/x86_64-linux-gnu/libspecbleach.a"; do
+    [[ -f "$candidate" ]] && HAS_BUNDLED_SPECBLEACH=true
+done
+
 missing=()
-pkg-config --exists fftw3     || missing+=("libfftw3-dev")
-pkg-config --exists rnnoise   || missing+=("librnnoise-dev  (or build from source)")
-pkg-config --exists libspecbleach || missing+=("libspecbleach-dev  (or build from source)")
-pkg-config --exists glfw3      || missing+=("libglfw3-dev")
-pkg-config --exists gl         || missing+=("libgl-dev  (mesa-common-dev)")
+pkg-config --exists fftw3  || missing+=("libfftw3-dev")
+$HAS_BUNDLED_RNNOISE    || pkg-config --exists rnnoise      || missing+=("librnnoise-dev  (or build from source)")
+$HAS_BUNDLED_SPECBLEACH || pkg-config --exists libspecbleach || missing+=("libspecbleach-dev  (or build from source)")
+pkg-config --exists glfw3  || missing+=("libglfw3-dev")
+pkg-config --exists gl     || missing+=("libgl-dev  (mesa-common-dev)")
 
 if [[ ${#missing[@]} -gt 0 ]]; then
     echo "ERROR: The following required libraries were not found:"

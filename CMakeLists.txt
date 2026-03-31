@@ -182,9 +182,19 @@ else()
     find_package(OpenGL REQUIRED)
     
     set(LINUX_STATIC_DIR "${CMAKE_SOURCE_DIR}/libs/linux-static")
+
+    # libspecbleach may be installed under an arch sub-directory
+    if(EXISTS "${LINUX_STATIC_DIR}/lib/libspecbleach.a")
+        set(LINUX_SPECBLEACH_A "${LINUX_STATIC_DIR}/lib/libspecbleach.a")
+    elseif(EXISTS "${LINUX_STATIC_DIR}/lib/x86_64-linux-gnu/libspecbleach.a")
+        set(LINUX_SPECBLEACH_A "${LINUX_STATIC_DIR}/lib/x86_64-linux-gnu/libspecbleach.a")
+    else()
+        set(LINUX_SPECBLEACH_A "")
+    endif()
+
     if(EXISTS "${LINUX_STATIC_DIR}/lib/libfftw3.a"
        AND EXISTS "${LINUX_STATIC_DIR}/lib/librnnoise.a"
-       AND EXISTS "${LINUX_STATIC_DIR}/lib/libspecbleach.a")
+       AND NOT LINUX_SPECBLEACH_A STREQUAL "")
         
         message(STATUS "Using static libs from ${LINUX_STATIC_DIR} (standalone build)")
         
@@ -194,7 +204,7 @@ else()
             "${LINUX_STATIC_DIR}/lib/libfftw3.a"
             "${LINUX_STATIC_DIR}/lib/libfftw3f.a"
             "${LINUX_STATIC_DIR}/lib/librnnoise.a"
-            "${LINUX_STATIC_DIR}/lib/libspecbleach.a"
+            "${LINUX_SPECBLEACH_A}"
         )
         
         # Still need glfw and OpenGL from system (they're universally available)

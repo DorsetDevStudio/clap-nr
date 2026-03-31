@@ -190,6 +190,7 @@ struct clap_nr_gui_s {
     volatile bool   running;        /* render thread exit signal      */
     volatile bool   visible;        /* whether the window is shown    */
     volatile bool   thread_ready;   /* render thread has initialised  */
+    volatile bool   pending_hide;   /* render thread should hide window (Linux) */
     /* macOS: main-thread event pump uses a GLFW-based timer callback  */
 #  ifdef __APPLE__
     volatile bool   do_show;        /* gui_show() sets; main pump acts */
@@ -1150,6 +1151,21 @@ static bool create_window_and_imgui(clap_nr_gui_s *g, HWND parent,
  * context and drives rendering at ~60 fps.
  * --------------------------------------------------------------------- */
 /* -----------------------------------------------------------------------
+ * Linux: process-wide "currently visible" tracker
+ *
+ * Only one plugin UI is shown at a time on Linux.  When gui_show() is
+ * called for an instance, any other currently-visible instance is hidden
+ * first.  The render thread that owns each window handles the actual
+ * glfwHideWindow call via the pending_hide flag.
+ * --------------------------------------------------------------------- */
+#ifndef _WIN32
+#ifndef __APPLE__
+static clap_nr_gui_s   *s_visible_gui = nullptr;
+static pthread_mutex_t  s_visible_mtx = PTHREAD_MUTEX_INITIALIZER;
+#endif
+#endif
+
+/* -----------------------------------------------------------------------
  * GLFW render thread  (Linux / macOS)
  *
  * On Linux: this thread calls glfwInit/glfwCreateWindow/glfwPollEvents.
@@ -1219,6 +1235,12 @@ static void *glfw_render_thread(void *arg)
 
 #else
     /* ---- Linux: this thread owns all GLFW operations. ---------------- */
+    /* Force the X11 backend so we get proper window decorations regardless
+     * of whether the session is Wayland (XWayland provides X11 compat). */
+#if defined(GLFW_PLATFORM_X11)
+    glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+#endif
+    setenv("WAYLAND_DISPLAY", "", 1);
     if (!glfwInit()) {
         g->thread_ready = true;
         return nullptr;
@@ -1263,6 +1285,12 @@ static void *glfw_render_thread(void *arg)
     bool closed_by_user = false;
     while (g->running && !glfwWindowShouldClose(g->glfw_win)) {
         glfwPollEvents();
+        /* Handle deferred hide request from gui_show() on another instance */
+        if (g->pending_hide) {
+            g->pending_hide = false;
+            g->visible = false;
+            glfwHideWindow(g->glfw_win);
+        }
         if (g->visible)
             render_frame(g);
         else {
@@ -1273,6 +1301,10 @@ static void *glfw_render_thread(void *arg)
     if (glfwWindowShouldClose(g->glfw_win)) {
         g->visible = false;
         closed_by_user = true;
+        /* Remove from the visible registry if we were registered */
+        pthread_mutex_lock(&s_visible_mtx);
+        if (s_visible_gui == g) s_visible_gui = nullptr;
+        pthread_mutex_unlock(&s_visible_mtx);
     }
 
     ImGui::SetCurrentContext(g->imgui_ctx);
@@ -1402,6 +1434,10 @@ void gui_destroy(clap_nr_gui_t *gui)
         });
     }
 #  else
+    /* Clear the visible registry if this instance was registered */
+    pthread_mutex_lock(&s_visible_mtx);
+    if (s_visible_gui == gui) s_visible_gui = nullptr;
+    pthread_mutex_unlock(&s_visible_mtx);
     /* Linux render thread already destroyed its own window */
 #  endif
 #endif
@@ -1559,12 +1595,20 @@ bool gui_show(clap_nr_gui_t *gui)
     if (!gui->glfw_win) {
         gui->running      = true;
         gui->visible      = false;
+        gui->pending_hide = false;
         gui->thread_ready = false;
         if (pthread_create(&gui->render_thread, nullptr, glfw_render_thread, gui) != 0)
             return false;
         if (!wait_for_thread_ready(gui))
             return false;
     }
+    /* Hide any other currently-visible instance before showing this one */
+    pthread_mutex_lock(&s_visible_mtx);
+    if (s_visible_gui && s_visible_gui != gui) {
+        s_visible_gui->pending_hide = true;   /* render thread will hide it */
+    }
+    s_visible_gui = gui;
+    pthread_mutex_unlock(&s_visible_mtx);
     gui->visible = true;
     glfwShowWindow(gui->glfw_win);
     glfwFocusWindow(gui->glfw_win);
@@ -1588,7 +1632,12 @@ bool gui_hide(clap_nr_gui_t *gui)
         if (win) glfwHideWindow(win);
     });
 #  else
-    glfwHideWindow(gui->glfw_win);
+    /* Linux: hide via pending_hide flag so the render thread (which owns
+     * the GLFW context) performs the actual glfwHideWindow call. */
+    gui->pending_hide = true;
+    pthread_mutex_lock(&s_visible_mtx);
+    if (s_visible_gui == gui) s_visible_gui = nullptr;
+    pthread_mutex_unlock(&s_visible_mtx);
 #  endif
 #endif
     return true;

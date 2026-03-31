@@ -25,7 +25,7 @@ The author can be reached by email at
 
 mw0lge@grange-lane.co.uk
 
-This code is based on code and ideas from  : https://github.com/NR0V/wdsp
+This code is based on code and ideas from  : https://github.com/TAPR/OpenHPSDR-wdsp
 and and uses RNNoise and libspecbleach
 https://gitlab.xiph.org/xiph/rnnoise
 https://github.com/lucianodato/libspecbleach

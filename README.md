@@ -560,7 +560,7 @@ plugin useful.
 The core DSP noise-reduction algorithms (ANR and EMNR) originate from
 Warren's wdsp library, a high-quality DSP stack written for amateur radio
 software-defined radio applications.
-- https://github.com/NR0V/wdsp
+- https://github.com/TAPR/OpenHPSDR-wdsp
 
 **Richard Samphire, MW0LGE** - `rnnr`, `sbnr`
 The RNNoise and libspecbleach integration (NR3 and NR4) was authored by

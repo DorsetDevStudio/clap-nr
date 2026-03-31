@@ -15,7 +15,7 @@ Files: `src/nr/anr.c`, `src/nr/anr.h`, `src/nr/emnr.c`, `src/nr/emnr.h`,
 Copyright (C) 2012, 2013, 2015, 2024, 2025 Warren Pratt, NR0V
 <warren@wpratt.com> / <warren@pratt.one>
 
-Original source: https://github.com/NR0V/wdsp (and related radio DSP
+Original source: https://github.com/TAPR/OpenHPSDR-wdsp (and related radio DSP
 projects by Warren Pratt).
 
 These files are distributed here under the same licence terms under which

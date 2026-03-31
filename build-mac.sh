@@ -28,7 +28,20 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build-mac"
-CMAKE_ARCH="arm64"
+
+# Use universal static libs if present (built by build-universal-deps.sh),
+# otherwise fall back to arm64-only Homebrew build.
+UNIVERSAL_LIB_DIR="$SCRIPT_DIR/libs/mac-universal"
+if [[ -f "$UNIVERSAL_LIB_DIR/libfftw3.a" && \
+      -f "$UNIVERSAL_LIB_DIR/librnnoise.a" && \
+      -f "$UNIVERSAL_LIB_DIR/libspecbleach.a" ]]; then
+    CMAKE_ARCH="arm64;x86_64"
+    echo "Universal libs found -- building arm64 + x86_64 universal binary."
+else
+    CMAKE_ARCH="arm64"
+    echo "Universal libs not found -- building arm64 only."
+    echo "(Run ./build-universal-deps.sh once to enable universal builds.)"
+fi
 
 # -- Check required tools ------------------------------------------------------
 for tool in cmake pkg-config clang clang++; do
@@ -48,9 +61,12 @@ done
 # -- Check required libraries -------------------------------------------------
 echo "Checking dependencies..."
 missing=()
-pkg-config --exists fftw3        || missing+=("fftw         (brew install fftw)")
-pkg-config --exists rnnoise      || missing+=("rnnoise      (build from source: https://gitlab.xiph.org/xiph/rnnoise)")
-pkg-config --exists libspecbleach || missing+=("libspecbleach  (build from source v0.2.0: https://github.com/lucianodato/libspecbleach)")
+if [[ "$CMAKE_ARCH" == "arm64" ]]; then
+    # Homebrew dylib build — need pkg-config to find them
+    pkg-config --exists fftw3         || missing+=("fftw         (brew install fftw)")
+    pkg-config --exists rnnoise       || missing+=("rnnoise      (build from source: https://gitlab.xiph.org/xiph/rnnoise)")
+    pkg-config --exists libspecbleach || missing+=("libspecbleach  (build from source v0.2.0: https://github.com/lucianodato/libspecbleach)")
+fi
 
 if [[ ${#missing[@]} -gt 0 ]]; then
     echo "ERROR: The following required libraries were not found:"
@@ -68,7 +84,7 @@ echo "All dependencies found."
 
 # -- Configure -----------------------------------------------------------------
 echo ""
-echo "Configuring (${BUILD_TYPE}, arm64)..."
+echo "Configuring (${BUILD_TYPE}, ${CMAKE_ARCH})..."
 cmake -S "$SCRIPT_DIR" \
       -B "$BUILD_DIR" \
       -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
@@ -86,6 +102,13 @@ PLUGIN="$BUILD_DIR/clap-nr.clap"
 if [[ ! -f "$PLUGIN" ]]; then
     echo "ERROR: Build succeeded but clap-nr.clap not found in $BUILD_DIR"
     exit 1
+fi
+
+echo ""
+ARCH_INFO=$(lipo -info "$PLUGIN" 2>&1)
+echo "Architectures: $ARCH_INFO"
+if [[ "$CMAKE_ARCH" == "arm64;x86_64" ]] && ! echo "$ARCH_INFO" | grep -q "x86_64"; then
+    echo "WARNING: Expected a universal binary but x86_64 slice is missing."
 fi
 
 echo ""

@@ -125,27 +125,51 @@ if(WIN32)
     target_compile_definitions(clap-nr PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX CLAP_NR_STANDALONE=1)
 
 elseif(APPLE)
-    # --- macOS: Homebrew libraries + native Cocoa/CVDisplayLink/OpenGL for GUI
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFTW3   REQUIRED IMPORTED_TARGET fftw3)
-    pkg_check_modules(RNNOISE REQUIRED IMPORTED_TARGET rnnoise)
-    pkg_check_modules(SPECBLEACH REQUIRED IMPORTED_TARGET libspecbleach)
-    find_package(OpenGL  REQUIRED)
+    # --- macOS: prefer universal static libs (libs/mac-universal/) if present,
+    #     otherwise fall back to Homebrew dylibs for local dev builds.
+    find_package(OpenGL REQUIRED)
 
-    target_include_directories(clap-nr PRIVATE
-        ${FFTW3_INCLUDE_DIRS}
-        ${RNNOISE_INCLUDE_DIRS}
-        ${SPECBLEACH_INCLUDE_DIRS}
-    )
-    target_link_libraries(clap-nr PRIVATE
-        PkgConfig::FFTW3
-        PkgConfig::RNNOISE
-        PkgConfig::SPECBLEACH
-        OpenGL::GL
-        pthread
-        "-framework Cocoa"
-        "-framework CoreFoundation"
-    )
+    set(UNIVERSAL_LIB_DIR "${CMAKE_SOURCE_DIR}/libs/mac-universal")
+    if(EXISTS "${UNIVERSAL_LIB_DIR}/libfftw3.a"
+       AND EXISTS "${UNIVERSAL_LIB_DIR}/librnnoise.a"
+       AND EXISTS "${UNIVERSAL_LIB_DIR}/libspecbleach.a")
+
+        message(STATUS "Using universal static libs from ${UNIVERSAL_LIB_DIR}")
+        target_include_directories(clap-nr PRIVATE "${UNIVERSAL_LIB_DIR}/include")
+        target_link_libraries(clap-nr PRIVATE
+            "${UNIVERSAL_LIB_DIR}/libfftw3.a"
+            "${UNIVERSAL_LIB_DIR}/libfftw3f.a"
+            "${UNIVERSAL_LIB_DIR}/librnnoise.a"
+            "${UNIVERSAL_LIB_DIR}/libspecbleach.a"
+            OpenGL::GL
+            pthread
+            "-framework Cocoa"
+            "-framework CoreFoundation"
+        )
+
+    else()
+
+        message(STATUS "Universal libs not found -- using Homebrew dylibs (arm64 only)")
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(FFTW3      REQUIRED IMPORTED_TARGET fftw3)
+        pkg_check_modules(RNNOISE    REQUIRED IMPORTED_TARGET rnnoise)
+        pkg_check_modules(SPECBLEACH REQUIRED IMPORTED_TARGET libspecbleach)
+        target_include_directories(clap-nr PRIVATE
+            ${FFTW3_INCLUDE_DIRS}
+            ${RNNOISE_INCLUDE_DIRS}
+            ${SPECBLEACH_INCLUDE_DIRS}
+        )
+        target_link_libraries(clap-nr PRIVATE
+            PkgConfig::FFTW3
+            PkgConfig::RNNOISE
+            PkgConfig::SPECBLEACH
+            OpenGL::GL
+            pthread
+            "-framework Cocoa"
+            "-framework CoreFoundation"
+        )
+
+    endif()
     target_compile_definitions(clap-nr PRIVATE CLAP_NR_STANDALONE=1)
     # Hide all symbols by default; only CLAP_EXPORT entry point is visible
     set_target_properties(clap-nr PROPERTIES

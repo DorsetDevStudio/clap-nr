@@ -32,6 +32,10 @@
  *   clap.gui          - Win32 embedded window (gui_win32.c)
  */
 
+#ifndef _WIN32
+#  define _GNU_SOURCE  /* for Dl_info, dladdr() */
+#endif
+
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>

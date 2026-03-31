@@ -721,7 +721,7 @@
       </ol>
 
       <p style="margin-top:24px; font-size:0.9rem; color:var(--muted);">
-        Supported on <strong style="color:var(--text);">Apple Silicon</strong> (not Intel Macs).
+        Supported on <strong style="color:var(--text);">Apple Silicon</strong> &amp; <strong>Intel</strong>.
       </p>
     </div>
 
@@ -740,24 +740,34 @@
       <ol class="install-steps">
         <li>
           <div class="step-body">
-            <strong>Download the Linux package</strong>
-            <p>Click the <strong>Download</strong> button at the top of this page to download the Linux package for your distribution.</p>
+            <strong>Download the Linux installer</strong>
+            <p>Click the <strong>Download</strong> button at the top of this page. Your browser will download a <code>.tar.gz</code> archive file named <code>clap-nr-{version}-linux-installer.tar.gz</code>.</p>
           </div>
         </li>
         <li>
           <div class="step-body">
-            <strong>Install the package</strong>
-            <p>On Debian / Ubuntu, open a terminal and run:</p>
-            <pre><code>sudo dpkg -i clap-nr-*.deb</code></pre>
-            <p>On Fedora / RHEL, run:</p>
-            <pre><code>sudo rpm -i clap-nr-*.rpm</code></pre>
-            <p>The plugin is installed to <code>/usr/lib/clap/</code> (system) or follow the prompts for a user install.</p>
+            <strong>Extract the archive</strong>
+            <p>Open a terminal in your Downloads folder and extract the archive:</p>
+            <pre><code>cd ~/Downloads
+tar xzf clap-nr-*-linux-installer.tar.gz
+cd clap-nr-*-linux-installer</code></pre>
+            <p>This creates a folder containing the plugin and installation script.</p>
+          </div>
+        </li>
+        <li>
+          <div class="step-body">
+            <strong>Run the installer</strong>
+            <p>Execute the installation script (no sudo required for user install):</p>
+            <pre><code>./install.sh</code></pre>
+            <p>This installs the plugin to <code>~/.clap/</code> in your home directory. For system-wide installation (all users), use:</p>
+            <pre><code>sudo ./install.sh --system</code></pre>
+            <p>System-wide installation places the plugin in <code>/usr/lib/clap/</code>.</p>
           </div>
         </li>
         <li>
           <div class="step-body">
             <strong>Open your host application</strong>
-            <p>Start your CLAP-compatible host. The plugin will appear as <strong>clap-nr</strong> in the plugin list.</p>
+            <p>Start your CLAP-compatible host. The plugin will appear as <strong>clap-nr</strong> in the plugin list. If your host was already running, restart it or trigger a plugin rescan.</p>
           </div>
         </li>
         <li>
@@ -769,8 +779,14 @@
       </ol>
 
       <p style="margin-top:24px; font-size:0.9rem; color:var(--muted);">
-        Supported on <strong style="color:var(--text);">x64 (AMD64)</strong> Linux distributions.
+        Works on <strong style="color:var(--text);">any x64 Linux distribution</strong> with glibc 2.31+ (Ubuntu 20.04+, Debian 11+, Fedora 30+). No dependencies to install - the installer is self-contained.
       </p>
+      
+      <h3 style="margin-top:36px; font-size:1rem;">Uninstalling</h3>
+      <p style="font-size:0.93rem;">To remove the plugin, run the uninstall script from the installer folder:</p>
+      <pre><code>./uninstall.sh</code></pre>
+      <p style="font-size:0.93rem;">Or for system-wide removal:</p>
+      <pre><code>sudo ./uninstall.sh --system</code></pre>
     </div>
 
     <!-- Developer: build from source -->
@@ -806,19 +822,41 @@ bash build-mac.sh</code></pre>
         <p>Installs to <code>~/Library/Audio/Plug-Ins/CLAP/</code>.</p>
 
         <h3>Linux (x64)</h3>
-        <p>Requires: GCC/Clang, CMake 3.20+, standard build tools.</p>
-<pre><code># Debian / Ubuntu
-sudo apt install build-essential cmake git
+        <p><strong>Quick development build:</strong></p>
+        <p>Requires: GCC/Clang, CMake 3.20+, standard build tools, and audio processing libraries.</p>
+<pre><code># Install system prerequisites
+sudo apt-get install -y build-essential cmake git pkg-config \
+    libglfw3-dev libgl-dev mesa-common-dev libfftw3-dev \
+    autoconf automake libtool meson ninja-build
 
-# Fedora / RHEL
-sudo dnf install gcc gcc-c++ cmake git
+# Build and install rnnoise and specbleach from source
+chmod +x install-linux-deps.sh
+./install-linux-deps.sh
 
-bash build-linux.sh</code></pre>
+# Set PKG_CONFIG_PATH or restart terminal
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+# Build the plugin
+./build-linux.sh</code></pre>
         <p>Output: <code>build-linux/clap-nr.clap</code></p>
+        
+        <p style="margin-top:20px;"><strong>Standalone installer build (for distribution):</strong></p>
+        <p>Create a distributable tarball that works on any Linux distro without requiring users to install dependencies:</p>
+<pre><code># One-time: build static libraries (~15 minutes)
+chmod +x build-linux-static-libs.sh
+./build-linux-static-libs.sh
+
+# Build the installer package
+chmod +x build-installer-linux.sh
+./build-installer-linux.sh</code></pre>
+        <p>Output: <code>dist/clap-nr-{version}-linux-installer.tar.gz</code></p>
+        
+        <p style="margin-top:20px;"><strong>Install (after building):</strong></p>
         <p><strong>User install</strong> (no root, installs to <code>~/.clap/</code>):</p>
-<pre><code>bash install-linux.sh</code></pre>
+<pre><code>./install-linux.sh</code></pre>
         <p><strong>System-wide install</strong> (installs to <code>/usr/lib/clap/</code>):</p>
-<pre><code>bash install-linux.sh --system</code></pre>
+<pre><code>sudo ./install-linux.sh --system</code></pre>
+        <p>See the README for complete Linux build instructions including all options.</p>
       </div>
     </details>
   </section>

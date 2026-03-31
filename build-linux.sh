@@ -42,7 +42,7 @@ echo "Checking dependencies..."
 missing=()
 pkg-config --exists fftw3     || missing+=("libfftw3-dev")
 pkg-config --exists rnnoise   || missing+=("librnnoise-dev  (or build from source)")
-pkg-config --exists specbleach || missing+=("libspecbleach-dev  (or build from source)")
+pkg-config --exists libspecbleach || missing+=("libspecbleach-dev  (or build from source)")
 pkg-config --exists glfw3      || missing+=("libglfw3-dev")
 pkg-config --exists gl         || missing+=("libgl-dev  (mesa-common-dev)")
 

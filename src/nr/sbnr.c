@@ -119,19 +119,10 @@ void xsbnr (SBNR a, int pos)
 {
     if (a->run && pos == a->position)
     {
-        /* The Windows bundled library uses the older SpectralBleachParameters API
-         * (no noise_estimation_method field).  Linux/macOS system packages
-         * provide the newer SpectralBleachAdaptiveParameters type. */
-#ifdef _WIN32
-        SpectralBleachParameters parameters =
-              (SpectralBleachParameters){.residual_listen = false,
-                                 .reduction_amount = a->reduction_amount,
-                                 .smoothing_factor = a->smoothing_factor,
-                                 .whitening_factor = a->whitening_factor,
-                                 .noise_scaling_type = a->noise_scaling_type,
-                                 .noise_rescale = a->noise_rescale,
-                                 .post_filter_threshold = a->post_filter_threshold};
-#else
+        /* The Mac universal library uses the newer SpectralBleachAdaptiveParameters API
+         * (with noise_estimation_method field).  Windows and Linux (GitHub source) use
+         * the older SpectralBleachParameters type. */
+#ifdef __APPLE__
         SpectralBleachAdaptiveParameters parameters =
               (SpectralBleachAdaptiveParameters){.residual_listen = false,
                                  .reduction_amount = a->reduction_amount,
@@ -141,6 +132,15 @@ void xsbnr (SBNR a, int pos)
                                  .noise_rescale = a->noise_rescale,
                                  .post_filter_threshold = a->post_filter_threshold,
                                  .noise_estimation_method = 0};
+#else
+        SpectralBleachParameters parameters =
+              (SpectralBleachParameters){.residual_listen = false,
+                                 .reduction_amount = a->reduction_amount,
+                                 .smoothing_factor = a->smoothing_factor,
+                                 .whitening_factor = a->whitening_factor,
+                                 .noise_scaling_type = a->noise_scaling_type,
+                                 .noise_rescale = a->noise_rescale,
+                                 .post_filter_threshold = a->post_filter_threshold};
 #endif
 
         specbleach_adaptive_load_parameters(a->st, parameters);

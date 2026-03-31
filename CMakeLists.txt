@@ -178,28 +178,62 @@ elseif(APPLE)
     )
 
 else()
-    # --- Linux: system libraries via pkg-config -----------------------------
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFTW3   REQUIRED IMPORTED_TARGET fftw3)
-    pkg_check_modules(RNNOISE REQUIRED IMPORTED_TARGET rnnoise)
-    pkg_check_modules(SPECBLEACH REQUIRED IMPORTED_TARGET libspecbleach)
-    find_package(glfw3 REQUIRED)
+    # --- Linux: prefer static libs for standalone distribution, fall back to system libs
     find_package(OpenGL REQUIRED)
-
-    target_include_directories(clap-nr PRIVATE
-        ${FFTW3_INCLUDE_DIRS}
-        ${RNNOISE_INCLUDE_DIRS}
-        ${SPECBLEACH_INCLUDE_DIRS}
-    )
-    target_link_libraries(clap-nr PRIVATE
-        PkgConfig::FFTW3
-        PkgConfig::RNNOISE
-        PkgConfig::SPECBLEACH
-        glfw
-        OpenGL::GL
-        pthread
-        dl
-    )
+    
+    set(LINUX_STATIC_DIR "${CMAKE_SOURCE_DIR}/libs/linux-static")
+    if(EXISTS "${LINUX_STATIC_DIR}/lib/libfftw3.a"
+       AND EXISTS "${LINUX_STATIC_DIR}/lib/librnnoise.a"
+       AND EXISTS "${LINUX_STATIC_DIR}/lib/libspecbleach.a")
+        
+        message(STATUS "Using static libs from ${LINUX_STATIC_DIR} (standalone build)")
+        
+        # Use static libraries for fftw3, rnnoise, specbleach
+        target_include_directories(clap-nr PRIVATE "${LINUX_STATIC_DIR}/include")
+        target_link_libraries(clap-nr PRIVATE
+            "${LINUX_STATIC_DIR}/lib/libfftw3.a"
+            "${LINUX_STATIC_DIR}/lib/libfftw3f.a"
+            "${LINUX_STATIC_DIR}/lib/librnnoise.a"
+            "${LINUX_STATIC_DIR}/lib/libspecbleach.a"
+        )
+        
+        # Still need glfw and OpenGL from system (they're universally available)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(GLFW3 REQUIRED IMPORTED_TARGET glfw3)
+        target_link_libraries(clap-nr PRIVATE
+            PkgConfig::GLFW3
+            OpenGL::GL
+            pthread
+            dl  # for dladdr() to locate plugin path
+            m   # math library
+        )
+        
+    else()
+        
+        message(STATUS "Static libs not found -- using system libraries via pkg-config")
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(FFTW3   REQUIRED IMPORTED_TARGET fftw3)
+        pkg_check_modules(RNNOISE REQUIRED IMPORTED_TARGET rnnoise)
+        pkg_check_modules(SPECBLEACH REQUIRED IMPORTED_TARGET libspecbleach)
+        pkg_check_modules(GLFW3 REQUIRED IMPORTED_TARGET glfw3)
+        
+        target_include_directories(clap-nr PRIVATE
+            ${FFTW3_INCLUDE_DIRS}
+            ${RNNOISE_INCLUDE_DIRS}
+            ${SPECBLEACH_INCLUDE_DIRS}
+        )
+        target_link_libraries(clap-nr PRIVATE
+            PkgConfig::FFTW3
+            PkgConfig::RNNOISE
+            PkgConfig::SPECBLEACH
+            PkgConfig::GLFW3
+            OpenGL::GL
+            pthread
+            dl
+        )
+        
+    endif()
+    
     target_compile_definitions(clap-nr PRIVATE CLAP_NR_STANDALONE=1)
     # Hide all symbols by default; only CLAP_EXPORT entry point is visible
     set_target_properties(clap-nr PROPERTIES

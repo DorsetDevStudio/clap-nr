@@ -42,7 +42,23 @@ Pre-built installers for each release are available on the
 requires administrator rights and copies the plugin and all required runtime
 files to `%CommonProgramFiles%\CLAP\` automatically.
 
-**macOS and Linux** - build from source using the instructions below.
+**Linux** - download `clap-nr-x.x.x-linux-installer.tar.gz`. This is a
+self-contained installer that works on any Linux distribution without requiring
+you to install dependencies via package manager. Extract the archive and run
+`./install.sh` - no sudo required for user-level installation:
+
+```bash
+tar xzf clap-nr-x.x.x-linux-installer.tar.gz
+cd clap-nr-x.x.x-linux-installer
+./install.sh
+```
+
+The plugin installs to `~/.clap/` by default. For system-wide installation,
+use `sudo ./install.sh --system` to install to `/usr/lib/clap/`. Works on
+Ubuntu 20.04+, Debian 11+, Fedora 30+, and any other distribution with
+glibc 2.31 or newer.
+
+**macOS** - build from source using the instructions below.
 
 ---
 
@@ -245,9 +261,6 @@ application first, then run the script again.
 <a name="macos"></a>
 ## macOS
 
-The macOS build requires Apple Silicon (arm64). An Intel build is not
-currently provided.
-
 ---
 
 ### Prerequisites
@@ -311,58 +324,152 @@ rescan inside the host.
 <a name="linux"></a>
 ## Linux
 
-The Linux build produces an x86_64 plugin.
+### Option A - Use the pre-built installer (coming soon)
+
+Pre-built Linux installers will be available on the Releases page.
 
 ---
 
-### Prerequisites
+### Option B - Build from source
 
-You will need the following packages. On Debian/Ubuntu:
-```
-sudo apt install build-essential cmake git
-```
-On Fedora/RHEL:
-```
-sudo dnf install gcc gcc-c++ cmake git
-```
+The Linux build supports two modes:
+
+**Development mode** - Uses system-installed libraries via pkg-config.
+Fast to set up but requires installing dependencies.
+
+**Standalone/Distribution mode** - Statically links fftw3, rnnoise, and
+specbleach. Creates a self-contained plugin that works on any Linux
+distribution without requiring users to install dependencies.
 
 ---
 
-### Part 1 - Get the source code
+#### Part 0 - Get the source code
 
 1. Open a terminal.
 2. Navigate to where you want to put the project:
-   ```
+   ```bash
    cd ~/Desktop
    ```
 3. Clone the repository:
-   ```
+   ```bash
    git clone https://github.com/DorsetDevStudio/clap-nr.git
    cd clap-nr
    ```
 
 ---
 
-### Part 2 - Build the plugin
+#### Part 1 - Install system prerequisites
 
+You need basic build tools and a few universally-available system libraries.
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake git pkg-config \
+    libglfw3-dev libgl-dev mesa-common-dev
 ```
-bash build-linux.sh
+
+**Fedora/RHEL:**
+```bash
+sudo dnf install -y gcc gcc-c++ cmake git pkg-config \
+    glfw-devel mesa-libGL-devel
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S base-devel cmake git pkg-config glfw-devel mesa
+```
+
+---
+
+#### Part 2a - Development build (quick setup)
+
+For development or personal use, install the audio processing libraries
+from your distribution's package manager.
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install -y libfftw3-dev
+```
+
+Then build rnnoise and specbleach from source:
+```bash
+# Install additional build tools
+sudo apt-get install -y autoconf automake libtool meson ninja-build
+
+# Run the dependency installer script
+chmod +x install-linux-deps.sh
+./install-linux-deps.sh
+```
+
+This script downloads, builds, and installs rnnoise and specbleach to
+`/usr/local/`. After it completes, set the PKG_CONFIG_PATH:
+```bash
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+```
+
+Or restart your terminal, then build the plugin:
+```bash
+./build-linux.sh
 ```
 
 The compiled plugin will be at `build-linux/clap-nr.clap`.
 
 ---
 
-### Part 3 - Install the plugin
+#### Part 2b - Standalone/Distribution build (for packaging)
+
+To create a distributable installer that works on any Linux distribution
+without requiring users to install dependencies:
+
+**Step 1 - Build static libraries (one-time setup, ~15 minutes):**
+```bash
+# Install additional build tools
+sudo apt-get install -y autoconf automake libtool meson ninja-build wget
+
+# Build static libraries
+chmod +x build-linux-static-libs.sh
+./build-linux-static-libs.sh
+```
+
+This downloads and compiles static versions of fftw3, rnnoise, and
+specbleach to `libs/linux-static/`. You only need to do this once.
+
+**Step 2 - Build the installer package:**
+```bash
+chmod +x build-installer-linux.sh
+./build-installer-linux.sh
+```
+
+This creates `dist/clap-nr-{version}-linux-installer.tar.gz` containing:
+- Pre-built clap-nr.clap (statically linked)
+- Installation scripts
+- RNNoise weight files
+- Documentation
+
+The tarball can be distributed to Linux users. They extract it and run
+`./install.sh` to install - no dependencies to install, no sudo required
+for user-level installation.
+
+**System requirements for end users:**
+- glibc 2.31+ (Ubuntu 20.04+, Debian 11+, Fedora 30+)
+- OpenGL/Mesa (for GUI)
+- GLFW3 (for GUI)
+
+These are standard on virtually all Linux desktop systems.
+
+---
+
+#### Part 3 - Install the plugin
 
 **User install** (no root required - installs to `~/.clap/`):
-```
-bash install-linux.sh
+```bash
+./install-linux.sh
 ```
 
 **System-wide install** (requires sudo - installs to `/usr/lib/clap/`):
-```
-bash install-linux.sh --system
+```bash
+sudo ./install-linux.sh --system
 ```
 
 The plugin is now installed. Open your CLAP-compatible host application
@@ -371,40 +478,59 @@ rescan inside the host.
 
 ---
 
+#### Part 4 - Uninstall the plugin
+
+**User uninstall:**
+```bash
+./uninstall-linux.sh
+```
+
+**System-wide uninstall:**
+```bash
+sudo ./uninstall-linux.sh --system
+```
+
+---
+
 ## Project layout
 
 ```
 clap-nr/
 ├-- CMakeLists.txt
-├-- LICENSE                  <- GNU GPL v2
-├-- THIRD-PARTY-NOTICES.md   <- upstream copyright notices
+├-- LICENSE                       <- GNU GPL v2
+├-- THIRD-PARTY-NOTICES.md        <- upstream copyright notices
 ├-- README.md
-├-- build-win.ps1            <- Windows: configure and build
-├-- build-installer-win.ps1  <- Windows: build signed installer (requires Inno Setup)
-├-- install-win.ps1          <- Windows: install to %CommonProgramFiles%\CLAP  (auto-elevates)
-├-- uninstall-win.ps1        <- Windows: uninstall  (auto-elevates)
-├-- build-mac.sh             <- macOS (arm64): configure and build
-├-- install-mac.sh           <- macOS: install to ~/Library/Audio/Plug-Ins/CLAP/
-├-- uninstall-mac.sh         <- macOS: uninstall
-├-- build-linux.sh           <- Linux (x64): configure and build
-├-- install-linux.sh         <- Linux: install to ~/.clap/  or  /usr/lib/clap/
-├-- uninstall-linux.sh       <- Linux: uninstall
+├-- build-win.ps1                 <- Windows: configure and build
+├-- build-installer-win.ps1       <- Windows: build signed installer (requires Inno Setup)
+├-- install-win.ps1               <- Windows: install to %CommonProgramFiles%\CLAP  (auto-elevates)
+├-- uninstall-win.ps1             <- Windows: uninstall  (auto-elevates)
+├-- build-mac.sh                  <- macOS (arm64): configure and build
+├-- install-mac.sh                <- macOS: install to ~/Library/Audio/Plug-Ins/CLAP/
+├-- uninstall-mac.sh              <- macOS: uninstall
+├-- build-linux.sh                <- Linux (x64): configure and build
+├-- build-linux-static-libs.sh    <- Linux: build static libs for standalone distribution
+├-- build-installer-linux.sh      <- Linux: create distributable installer tarball
+├-- install-linux.sh              <- Linux: install to ~/.clap/  or  /usr/lib/clap/
+├-- install-linux-deps.sh         <- Linux: build/install rnnoise and specbleach from source
+├-- uninstall-linux.sh            <- Linux: uninstall
 ├-- include/
-│   └-- clap/                <- CLAP SDK headers (vendored, MIT licence)
+│   └-- clap/                     <- CLAP SDK headers (vendored, MIT licence)
 ├-- libs/
-│   ├-- fftw/                <- fftw3.h + .dll/.lib
-│   ├-- rnnoise/             <- rnnoise.h + .dll/.lib + weights
-│   └-- specbleach/          <- specbleach_*.h + .dll/.lib
+│   ├-- fftw/                     <- fftw3.h + .dll/.lib  (Windows)
+│   ├-- rnnoise/                  <- rnnoise.h + .dll/.lib + weights  (Windows)
+│   ├-- specbleach/               <- specbleach_*.h + .dll/.lib  (Windows)
+│   ├-- mac-universal/            <- Universal static libs + headers  (macOS)
+│   └-- linux-static/             <- Static libs + headers  (Linux, created by build-linux-static-libs.sh)
 └-- src/
-    ├-- clap_nr.c            <- CLAP plugin entry point and audio processing
-    ├-- gui_imgui.cpp        <- Cross-platform Dear ImGui UI
+    ├-- clap_nr.c                 <- CLAP plugin entry point and audio processing
+    ├-- gui_imgui.cpp             <- Cross-platform Dear ImGui UI
     ├-- gui.h
-    └-- nr/                  <- DSP noise-reduction algorithm sources
-        ├-- anr.c/h          (NR1 - Adaptive LMS)
-        ├-- emnr.c/h         (NR2 - Spectral MMSE / ML)
-        ├-- rnnr.c/h         (NR3 - RNNoise neural net)
-        ├-- sbnr.c/h         (NR4 - libspecbleach)
-        ├-- calculus.c/h     <- lookup tables for EMNR
+    └-- nr/                       <- DSP noise-reduction algorithm sources
+        ├-- anr.c/h               (NR1 - Adaptive LMS)
+        ├-- emnr.c/h              (NR2 - Spectral MMSE / ML)
+        ├-- rnnr.c/h              (NR3 - RNNoise neural net)
+        ├-- sbnr.c/h              (NR4 - libspecbleach)
+        ├-- calculus.c/h          <- lookup tables for EMNR
         ├-- zetaHat.c/h
         ├-- FDnoiseIQ.c/h
         └-- comm.h

@@ -1,0 +1,10 @@
+prefix=/mnt/c/GIT_LOCAL/clap-nr/libs/linux-static
+libdir=${prefix}/lib/x86_64-linux-gnu
+includedir=${prefix}/include
+
+Name: libspecbleach
+Description: C library for audio noise reduction and other spectral effects
+Version: 0.3.0
+Requires: fftw3f
+Libs: -L${libdir} -lspecbleach -lm
+Cflags: -I${includedir}

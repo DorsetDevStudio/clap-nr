@@ -281,11 +281,21 @@ install(TARGETS clap-nr DESTINATION .)
 if(WIN32)
     install(FILES
         "${FFTW_DIR}/libfftw3-3.dll"
+        "${FFTW_DIR}/libfftw3f-3.dll"
         "${RNNOISE_DIR}/rnnoise.dll"
+        "${RNNOISE_DIR}/rnnoise_avx2.dll"
         "${SPECBLEACH_DIR}/specbleach.dll"
         "${RNNOISE_DIR}/rnnoise_weights_small.bin"
         "${RNNOISE_DIR}/rnnoise_weights_large.bin"
         DESTINATION .
+    )
+    install(FILES "${RNNOISE_DIR}/rnnoise_weights_small.bin"
+        DESTINATION .
+        RENAME "rnnoise-small.bin"
+    )
+    install(FILES "${RNNOISE_DIR}/rnnoise_weights_large.bin"
+        DESTINATION .
+        RENAME "rnnoise-large.bin"
     )
 endif()
 

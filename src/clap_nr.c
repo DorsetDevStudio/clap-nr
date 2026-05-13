@@ -46,6 +46,9 @@
 /* System headers required by NR algorithm structs */
 #ifdef _WIN32
 #  include <Windows.h>
+#  ifdef _MSC_VER
+#    include <float.h>
+#  endif
 #else
 #  include <stdatomic.h>
 #  include <dlfcn.h>
@@ -172,6 +175,7 @@ typedef struct {
 
     /* Per-channel double-precision in-place buffers */
     double *buf[2];
+    float  *fbuf[2];  /* float staging for NR0 and 32/64-bit CLAP I/O */
 
     /* EMNR uses a fixed 1024-sample bsize.  These rings decouple the
      * host block size from xemnr's required stride. */
@@ -255,6 +259,7 @@ static clap_process_status plugin_process(const clap_plugin_t *, const clap_proc
 static const void         *plugin_get_extension(const clap_plugin_t *, const char *);
 static void                plugin_on_main_thread(const clap_plugin_t *);
 static void                nr_log(const char *fmt, ...);
+static bool                nr_file_exists_readable(const char *path);
 
 /* -----------------------------------------------------------------------
  * Helper: apply ANR parameter changes to the live instance
@@ -412,16 +417,19 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
  * 2 = rnnoise_weights_large.bin  (beside the .clap)
  * If the file cannot be found, falls back to the built-in model silently.
  * --------------------------------------------------------------------- */
-static void apply_nr3_model(clap_nr_t *self)
+static void apply_nr3_model(clap_nr_t *self, int model)
 {
-    if (self->nr3_model == 0) {
+    if (model == 0) {
         RNNRloadModel(NULL);
         return;
     }
 #ifdef _WIN32
     char path[MAX_PATH];
-    HMODULE hmod = GetModuleHandleA("clap-nr.clap");
-    if (!hmod || !GetModuleFileNameA(hmod, path, MAX_PATH)) {
+    HMODULE hmod = NULL;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)&apply_nr3_model, &hmod) ||
+        !GetModuleFileNameA(hmod, path, MAX_PATH)) {
         RNNRloadModel(NULL);
         return;
     }
@@ -440,22 +448,44 @@ static void apply_nr3_model(clap_nr_t *self)
 #endif
     if (!slash) { RNNRloadModel(NULL); return; }
     *(slash + 1) = '\0';
-    const char *fname = (self->nr3_model == 1)
-                        ? "rnnoise_weights_small.bin"
-                        : "rnnoise_weights_large.bin";
-    size_t dlen = strlen(path);
-    size_t flen = strlen(fname);
-#ifdef _WIN32
-    if (dlen + flen < MAX_PATH)
-#else
-    if (dlen + flen < PATH_MAX)
-#endif
-        memcpy(path + dlen, fname, flen + 1);
-    else {
-        RNNRloadModel(NULL);
-        return;
+    const char *candidates[2];
+    if (model == 1) {
+        candidates[0] = "rnnoise_weights_small.bin";
+        candidates[1] = "rnnoise-small.bin";
+    } else {
+        candidates[0] = "rnnoise_weights_large.bin";
+        candidates[1] = "rnnoise-large.bin";
     }
-    RNNRloadModel(path);
+    char base_path[
+#ifdef _WIN32
+        MAX_PATH
+#else
+        PATH_MAX
+#endif
+    ];
+    strncpy(base_path, path, sizeof(base_path) - 1);
+    base_path[sizeof(base_path) - 1] = '\0';
+
+    for (int c = 0; c < 2; ++c) {
+        const char *fname = candidates[c];
+        size_t dlen = strlen(base_path);
+        size_t flen = strlen(fname);
+#ifdef _WIN32
+        if (dlen + flen < MAX_PATH)
+#else
+        if (dlen + flen < PATH_MAX)
+#endif
+        {
+            memcpy(path, base_path, dlen + 1);
+            memcpy(path + dlen, fname, flen + 1);
+            if (nr_file_exists_readable(path)) {
+                RNNRloadModel(path);
+                return;
+            }
+        }
+    }
+    nr_log("NR3 model file missing for selection %d; falling back to built-in", model);
+    RNNRloadModel(NULL);
 }
 
 static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *pv)
@@ -476,9 +506,16 @@ static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *
     case PARAM_EMNR_NPE_METHOD:  self->emnr_npe_method  = (int)pv->value;  break;
     case PARAM_EMNR_AE_RUN:      self->emnr_ae_run      = (int)pv->value;  break;
     case PARAM_NR3_MODEL:
-        self->nr3_model  = (int)pv->value;
-        self->nr3_model_dirty = true;
+    {
+        int next_model = (int)pv->value;
+        if (next_model < 0) next_model = 0;
+        if (next_model > 2) next_model = 2;
+        if (self->nr3_model != next_model) {
+            self->nr3_model = next_model;
+            self->nr3_model_dirty = true;
+        }
         break;
+    }
     case PARAM_NR3_STRENGTH: self->nr3_strength = (float)pv->value; break;
     case PARAM_NR0_AGGRESSION:   self->nr0_aggression  = (float)pv->value; break;
     case PARAM_NR0_MAX_NOTCHES:  self->nr0_max_notches = (int)pv->value;   break;
@@ -516,7 +553,7 @@ static void on_gui_param_change(void *plugin_ptr, clap_id param_id, double value
      * By the time plugin_on_main_thread() fires, self->nr3_model already holds
      * the FINAL selected value, so only one load ever happens regardless of
      * how many times the user clicked. */
-    if (param_id == PARAM_NR3_MODEL) {
+    if (param_id == PARAM_NR3_MODEL && self->nr3_model_dirty) {
         if (!self->nr3_callback_pending) {
             self->nr3_callback_pending = true;
             self->host->request_callback(self->host);
@@ -557,6 +594,79 @@ static void on_gui_close(void *plugin_ptr)
  * Plugin vtable
  * --------------------------------------------------------------------- */
 static bool plugin_init(const clap_plugin_t *p) { (void)p; return true; }
+
+static void audio_enable_denormal_flush(void)
+{
+#if defined(_WIN32) && defined(_MSC_VER) && defined(_MCW_DN) && defined(_DN_FLUSH)
+    unsigned int cw;
+    (void)_controlfp_s(&cw, _DN_FLUSH, _MCW_DN);
+#endif
+}
+
+static float audio_read_sample(const clap_audio_buffer_t *buf, uint32_t ch, uint32_t i)
+{
+    if (!buf || ch >= buf->channel_count) return 0.0f;
+    uint32_t idx = (ch < 64 && (buf->constant_mask & (1ULL << ch))) ? 0u : i;
+
+    if (buf->data32 && buf->data32[ch])
+        return buf->data32[ch][idx];
+    if (buf->data64 && buf->data64[ch])
+        return (float)buf->data64[ch][idx];
+    return 0.0f;
+}
+
+static void audio_write_sample(clap_audio_buffer_t *buf, uint32_t ch, uint32_t i, float v)
+{
+    if (!buf || ch >= buf->channel_count) return;
+
+    if (buf->data32 && buf->data32[ch])
+        buf->data32[ch][i] = v;
+    else if (buf->data64 && buf->data64[ch])
+        buf->data64[ch][i] = (double)v;
+}
+
+static bool audio_channel_writable(const clap_audio_buffer_t *buf, uint32_t ch)
+{
+    return buf && ch < buf->channel_count &&
+           ((buf->data32 && buf->data32[ch]) || (buf->data64 && buf->data64[ch]));
+}
+
+static bool audio_channel_readable(const clap_audio_buffer_t *buf, uint32_t ch)
+{
+    return audio_channel_writable(buf, ch);
+}
+
+static void audio_copy_channel(const clap_audio_buffer_t *src_buf, clap_audio_buffer_t *dst_buf,
+                               uint32_t ch, uint32_t n)
+{
+    if (!audio_channel_readable(src_buf, ch) || !audio_channel_writable(dst_buf, ch))
+        return;
+
+    bool constant = ch < 64 && (src_buf->constant_mask & (1ULL << ch)) != 0;
+    if (!constant && src_buf->data32 && dst_buf->data32 &&
+        src_buf->data32[ch] && dst_buf->data32[ch]) {
+        if (src_buf->data32[ch] != dst_buf->data32[ch])
+            memcpy(dst_buf->data32[ch], src_buf->data32[ch], n * sizeof(float));
+        return;
+    }
+    if (!constant && src_buf->data64 && dst_buf->data64 &&
+        src_buf->data64[ch] && dst_buf->data64[ch]) {
+        if (src_buf->data64[ch] != dst_buf->data64[ch])
+            memcpy(dst_buf->data64[ch], src_buf->data64[ch], n * sizeof(double));
+        return;
+    }
+
+    for (uint32_t i = 0; i < n; ++i)
+        audio_write_sample(dst_buf, ch, i, audio_read_sample(src_buf, ch, i));
+}
+
+static bool nr_file_exists_readable(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
 
 static void plugin_destroy(const clap_plugin_t *p)
 {
@@ -616,6 +726,7 @@ static void plugin_destroy(const clap_plugin_t *p)
         if (self->sbnr[ch]) { destroy_sbnr(self->sbnr[ch]); self->sbnr[ch] = NULL; }
         if (self->nr0[ch])  { destroy_nr0 (self->nr0[ch]);  self->nr0[ch]  = NULL; }
         free(self->buf[ch]); self->buf[ch] = NULL;
+        free(self->fbuf[ch]); self->fbuf[ch] = NULL;
     }
 
     free(self);
@@ -667,6 +778,8 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
             for (int ch = 0; ch < 2; ++ch) {
                 self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
                 if (!self->buf[ch]) { nr_log("activate: calloc failed ch=%d", ch); goto activate_done; }
+                self->fbuf[ch] = (float *)calloc(max_frames, sizeof(float));
+                if (!self->fbuf[ch]) { nr_log("activate: float calloc failed ch=%d", ch); goto activate_done; }
 
                 self->anr[ch]  = create_anr(0, 0, (int)max_frames,
                                             self->buf[ch], self->buf[ch],
@@ -740,6 +853,9 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
                     free(self->buf[ch]);
                     self->buf[ch] = (double *)calloc(2 * max_frames, sizeof(double));
                     if (!self->buf[ch]) { nr_log("reactivate: calloc failed ch=%d", ch); goto activate_done; }
+                    free(self->fbuf[ch]);
+                    self->fbuf[ch] = (float *)calloc(max_frames, sizeof(float));
+                    if (!self->fbuf[ch]) { nr_log("reactivate: float calloc failed ch=%d", ch); goto activate_done; }
 
                     if (self->anr[ch]) {
                         setSize_anr   (self->anr[ch],  (int)max_frames);
@@ -820,6 +936,7 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
             self->anr[ch] = NULL; self->emnr[ch] = NULL;
             self->rnnr[ch] = NULL; self->sbnr[ch] = NULL;
             free(self->buf[ch]); self->buf[ch] = NULL;
+            free(self->fbuf[ch]); self->fbuf[ch] = NULL;
         }
         self->nr_mode = 0;
         ok = true;
@@ -871,6 +988,7 @@ static void plugin_deactivate(const clap_plugin_t *p)
 static bool plugin_start_processing(const clap_plugin_t *p)
 {
     clap_nr_t *self = (clap_nr_t *)p;
+    audio_enable_denormal_flush();
     /* Re-enable DSP after a stop/start cycle.  Activate() set this to true
      * initially; stop_processing() cleared it; we restore it here so that
      * process() does real work again rather than passing audio through. */
@@ -927,6 +1045,7 @@ static void plugin_reset(const clap_plugin_t *p)
 static clap_process_status plugin_process(const clap_plugin_t *p, const clap_process_t *proc)
 {
     clap_nr_t *self = (clap_nr_t *)p;
+    audio_enable_denormal_flush();
 
     /* Register this call so deactivate() can wait for us to finish. */
 #ifdef _WIN32
@@ -942,13 +1061,12 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         uint32_t nc = proc->frames_count;
         if (nc > 0 && proc->audio_inputs_count > 0 && proc->audio_outputs_count > 0) {
             const clap_audio_buffer_t *ib = &proc->audio_inputs[0];
-            const clap_audio_buffer_t *ob = &proc->audio_outputs[0];
+            clap_audio_buffer_t *ob = &proc->audio_outputs[0];
             uint32_t cch = ib->channel_count < ob->channel_count
                          ? ib->channel_count : ob->channel_count;
-            for (uint32_t ch = 0; ch < cch; ++ch) {
-                float *src = ib->data32[ch], *dst = ob->data32[ch];
-                if (src && dst && src != dst) memcpy(dst, src, nc * sizeof(float));
-            }
+            ob->constant_mask = 0;
+            for (uint32_t ch = 0; ch < cch; ++ch)
+                audio_copy_channel(ib, ob, ch, nc);
         }
 #ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
@@ -1005,19 +1123,16 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     }
 
     const clap_audio_buffer_t *in_buf  = &proc->audio_inputs[0];
-    const clap_audio_buffer_t *out_buf = &proc->audio_outputs[0];
+    clap_audio_buffer_t *out_buf = &proc->audio_outputs[0];
     uint32_t in_ch  = in_buf->channel_count;
     uint32_t out_ch = out_buf->channel_count;
 
     /* Bypass: pass every input channel straight to the matching output */
     if (self->nr_mode == 0) {
         uint32_t copy_ch = (in_ch < out_ch) ? in_ch : out_ch;
-        for (uint32_t ch = 0; ch < copy_ch; ++ch) {
-            float *src = in_buf->data32[ch];
-            float *dst = out_buf->data32[ch];
-            if (src && dst && src != dst)
-                memcpy(dst, src, n * sizeof(float));
-        }
+        out_buf->constant_mask = 0;
+        for (uint32_t ch = 0; ch < copy_ch; ++ch)
+            audio_copy_channel(in_buf, out_buf, ch, n);
 #ifdef _WIN32
         InterlockedDecrement(&self->process_depth);
 #else
@@ -1028,6 +1143,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
 
     uint32_t proc_ch = (in_ch < out_ch) ? in_ch : out_ch;
     if (proc_ch > 2) proc_ch = 2;
+    out_buf->constant_mask = 0;
 
     /* Guard the entire per-channel DSP block with SEH (Windows only).
      * If any NR algorithm (fftw_execute, rnnoise_process_frame, xsbnr, ...)
@@ -1044,22 +1160,25 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
     __try {
 #endif
     for (uint32_t ch = 0; ch < proc_ch; ++ch) {
-        float *src = in_buf->data32[ch];
-        float *dst = out_buf->data32[ch];
-
         /* NR0 (mode 5): direct float I/O -- skip double-precision buffer path */
         if (self->nr_mode == 5) {
-            if (!src || !dst) continue;
-            if (self->nr0[ch] && self->nr0[ch]->run)
-                xnr0(self->nr0[ch], src, dst, (int)n);
-            else if (src != dst)
-                memcpy(dst, src, n * sizeof(float));
+            if (!audio_channel_readable(in_buf, ch) || !audio_channel_writable(out_buf, ch))
+                continue;
+            if (self->nr0[ch] && self->nr0[ch]->run && self->fbuf[ch]) {
+                for (uint32_t i = 0; i < n; ++i)
+                    self->fbuf[ch][i] = audio_read_sample(in_buf, ch, i);
+                xnr0(self->nr0[ch], self->fbuf[ch], self->fbuf[ch], (int)n);
+                for (uint32_t i = 0; i < n; ++i)
+                    audio_write_sample(out_buf, ch, i, self->fbuf[ch][i]);
+            } else {
+                audio_copy_channel(in_buf, out_buf, ch, n);
+            }
             continue;
         }
 
         /* Passthrough if audio pointers or NR buffer are missing */
-        if (!src || !dst || !self->buf[ch]) {
-            if (src && dst && src != dst) memcpy(dst, src, n * sizeof(float));
+        if (!audio_channel_readable(in_buf, ch) || !audio_channel_writable(out_buf, ch) || !self->buf[ch]) {
+            audio_copy_channel(in_buf, out_buf, ch, n);
             continue;
         }
 
@@ -1068,7 +1187,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
              * explicitly on every call — previous NR output may have written
              * non-zero values there, which would corrupt the next frame. */
             for (uint32_t i = 0; i < n; ++i) {
-                self->buf[ch][2 * i]     = (double)src[i];
+                self->buf[ch][2 * i]     = (double)audio_read_sample(in_buf, ch, i);
                 self->buf[ch][2 * i + 1] = 0.0;
             }
 
@@ -1158,9 +1277,16 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
                     if (*in_count == 480) {
                         /* Full 480-sample frame: call RNNoise directly.
                          * Lock cs so RNNRloadModel can safely swap st. */
-                        NR_MUTEX_LOCK(self->rnnr[ch]->cs);
-                        rnnoise_process_frame(self->rnnr[ch]->st, outbuf, inbuf);
-                        NR_MUTEX_UNLOCK(self->rnnr[ch]->cs);
+                        RNNR r = self->rnnr[ch];
+                        bool did_process = false;
+                        NR_MUTEX_LOCK(r->cs);
+                        if (r->run && r->st) {
+                            rnnoise_process_frame(r->st, outbuf, inbuf);
+                            did_process = true;
+                        }
+                        NR_MUTEX_UNLOCK(r->cs);
+                        if (!did_process)
+                            memcpy(outbuf, inbuf, 480 * sizeof(float));
                         if (self->nr3_strength < 1.0f) {
                             float s = self->nr3_strength;
                             float t = 1.0f - s;
@@ -1194,7 +1320,7 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
 
             /* Read back the real (even) output slots only */
             for (uint32_t i = 0; i < n; ++i)
-                dst[i] = (float)self->buf[ch][2 * i];
+                audio_write_sample(out_buf, ch, i, (float)self->buf[ch][2 * i]);
         }
     }
     /* Update active notch counter for GUI display.  Audio thread writes one
@@ -1215,12 +1341,12 @@ static clap_process_status plugin_process(const clap_plugin_t *p, const clap_pro
         /* Overwrite any partial DSP output with clean passthrough audio. */
         if (proc->audio_inputs_count > 0 && proc->audio_outputs_count > 0) {
             const clap_audio_buffer_t *ib2 = &proc->audio_inputs[0];
-            const clap_audio_buffer_t *ob2 = &proc->audio_outputs[0];
+            clap_audio_buffer_t *ob2 = &proc->audio_outputs[0];
             uint32_t cc = (ib2->channel_count < ob2->channel_count)
                          ? ib2->channel_count : ob2->channel_count;
+            ob2->constant_mask = 0;
             for (uint32_t c = 0; c < cc; ++c)
-                if (ib2->data32[c] && ob2->data32[c])
-                    memcpy(ob2->data32[c], ib2->data32[c], n * sizeof(float));
+                audio_copy_channel(ib2, ob2, c, n);
         }
     }
 #endif
@@ -1610,7 +1736,7 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *stream)
     apply_anr_params(self);
     apply_emnr_params(self);
     apply_nr0_params(self);
-    apply_nr3_model(self);
+    apply_nr3_model(self, self->nr3_model);
 
     if (self->gui) {
         gui_set_param(self->gui, PARAM_NR_MODE,          (double)self->nr_mode);
@@ -1857,12 +1983,21 @@ static void plugin_on_main_thread(const clap_plugin_t *p)
     clap_nr_t *self = (clap_nr_t *)p;
     /* Apply any NR3 model change that was deferred from the audio thread
      * (host automation of PARAM_NR3_MODEL).  File I/O is safe here.
-     * Clear pending BEFORE the load so that any click that arrives while
-     * the file is being read queues a fresh callback for that new value. */
+     * Coalesce repeated clicks: if another selection arrives while this load
+     * is in progress, keep dirty set and request one follow-up callback. */
     if (self->nr3_model_dirty) {
+        int target_model = self->nr3_model;
         self->nr3_callback_pending = false;
-        apply_nr3_model(self);
-        self->nr3_model_dirty = false;
+        apply_nr3_model(self, target_model);
+        if (self->nr3_model == target_model) {
+            self->nr3_model_dirty = false;
+        } else {
+            self->nr3_model_dirty = true;
+            if (self->active && !self->nr3_callback_pending) {
+                self->nr3_callback_pending = true;
+                self->host->request_callback(self->host);
+            }
+        }
     }
 }
 

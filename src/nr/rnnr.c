@@ -94,8 +94,34 @@ static RNNModel* _rnnr_model = NULL;
 static NR_MUTEX _rnnr_load_cs;
 static int      _rnnr_load_cs_inited = 0;
 
+static RNNModel *rnnr_model_from_filename_safe(const char *file_path)
+{
+#if defined(_WIN32) && defined(_MSC_VER)
+    __try {
+        return rnnoise_model_from_filename(file_path);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+#else
+    return rnnoise_model_from_filename(file_path);
+#endif
+}
+
+static DenoiseState *rnnr_create_state_safe(RNNModel *model)
+{
+#if defined(_WIN32) && defined(_MSC_VER)
+    __try {
+        return rnnoise_create(model);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+#else
+    return rnnoise_create(model);
+#endif
+}
+
 //ringbuffer
-static void ring_buffer_init(rnnr_ring_buffer* rb, int capacity) 
+static void ring_buffer_init(rnnr_ring_buffer* rb, int capacity)
 {
     rb->buf = malloc0(capacity * sizeof(float));
     rb->capacity = capacity;
@@ -104,7 +130,7 @@ static void ring_buffer_init(rnnr_ring_buffer* rb, int capacity)
     rb->count = 0;
 }
 
-static void ring_buffer_free(rnnr_ring_buffer* rb) 
+static void ring_buffer_free(rnnr_ring_buffer* rb)
 {
     nr_aligned_free(rb->buf);
     rb->buf = NULL;
@@ -112,9 +138,9 @@ static void ring_buffer_free(rnnr_ring_buffer* rb)
     rb->head = rb->tail = rb->count = 0;
 }
 
-static void ring_buffer_put(rnnr_ring_buffer* rb, float v) 
+static void ring_buffer_put(rnnr_ring_buffer* rb, float v)
 {
-    if (rb->count < rb->capacity) 
+    if (rb->count < rb->capacity)
     {
         rb->buf[rb->tail] = v;
         rb->tail = (rb->tail + 1) % rb->capacity;
@@ -158,7 +184,7 @@ void SetRXARNNRRun (int channel, int run)
 	RNNR a = rxa[channel].rnnr.p;
 	if (a->run != run)
 	{
-		RXAbp1Check (channel, rxa[channel].amd.p->run, rxa[channel].snba.p->run, 
+		RXAbp1Check (channel, rxa[channel].amd.p->run, rxa[channel].snba.p->run,
                              rxa[channel].emnr.p->run, rxa[channel].anf.p->run, rxa[channel].anr.p->run,
                              run, rxa[channel].sbnr.p->run); // NR3 + NR4 support
 
@@ -170,7 +196,7 @@ void SetRXARNNRRun (int channel, int run)
 }
 #endif // CLAP_NR_STANDALONE
 
-void setSize_rnnr(RNNR a, int size) 
+void setSize_rnnr(RNNR a, int size)
 {
     nr_aligned_free(a->output_buffer);
     a->buffer_size = size;
@@ -200,7 +226,9 @@ RNNR create_rnnr(int run, int position, int size, double* in, double* out, int r
     a->run = run;
     a->position = position;
     a->rate = rate; // not used currently, but here for future use
-    a->st = rnnoise_create(_rnnr_model);    
+    a->st = rnnr_create_state_safe(_rnnr_model);
+    if (!a->st && _rnnr_model)
+        a->st = rnnr_create_state_safe(NULL);
     a->frame_size = rnnoise_get_frame_size();
     a->in = in;
     a->out = out;
@@ -316,7 +344,7 @@ void xrnnr(RNNR a, int pos)
     }
 }
 
-void destroy_rnnr(RNNR a) 
+void destroy_rnnr(RNNR a)
 {
     // we dont need to maintain order, so just replace with last, and decrement total
     for (int i = 0; i < _rnnr_count; i++)
@@ -363,49 +391,89 @@ void RNNRloadModel(const char* file_path)
      * should not occur in normal use -- but this mutex is the safety net. */
     if (_rnnr_load_cs_inited) NR_MUTEX_LOCK(_rnnr_load_cs);
 
-    // Stop all instances and destroy their DenoiseState.
-    // a->st is nulled immediately after destroy so that any thread
-    // that reads it outside the mutex (before this fix propagates) sees
-    // NULL rather than a dangling pointer.
-    for (int i = 0; i < _rnnr_count; i++)
-    {
-        RNNR a = _rnnr_instances[i];
-        NR_MUTEX_LOCK(a->cs);
-        a->run_old = a->run;
-        a->run = 0;
-        rnnoise_destroy(a->st);
-        a->st = NULL;
-        NR_MUTEX_UNLOCK(a->cs);
-    }
-
-    // free up any previous loaded model
-    if (_rnnr_model)
-    {
-        rnnoise_model_free(_rnnr_model);
-    }
-
-    _rnnr_model = NULL; // default to baked in model
-
-    // try to load
+    RNNModel *new_model = NULL;
     if (file_path && file_path[0])
+        new_model = rnnr_model_from_filename_safe(file_path);
+
+    int count = _rnnr_count;
+    DenoiseState **new_states = NULL;
+    DenoiseState **old_states = NULL;
+
+    if (count > 0)
     {
-        _rnnr_model = rnnoise_model_from_filename(file_path);
+        new_states = malloc0((size_t)count * sizeof(DenoiseState *));
+        old_states = malloc0((size_t)count * sizeof(DenoiseState *));
+        if (!new_states || !old_states)
+        {
+            nr_aligned_free(new_states);
+            nr_aligned_free(old_states);
+            if (new_model) rnnoise_model_free(new_model);
+            if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
+            return;
+        }
+
+        int ok = 1;
+        for (int i = 0; i < count; i++)
+        {
+            new_states[i] = rnnr_create_state_safe(new_model);
+            if (!new_states[i]) { ok = 0; break; }
+        }
+
+        if (!ok && new_model)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (new_states[i]) {
+                    rnnoise_destroy(new_states[i]);
+                    new_states[i] = NULL;
+                }
+            }
+            rnnoise_model_free(new_model);
+            new_model = NULL;
+            ok = 1;
+            for (int i = 0; i < count; i++)
+            {
+                new_states[i] = rnnr_create_state_safe(NULL);
+                if (!new_states[i]) { ok = 0; break; }
+            }
+        }
+
+        if (!ok)
+        {
+            for (int i = 0; i < count; i++)
+                if (new_states[i]) rnnoise_destroy(new_states[i]);
+            nr_aligned_free(new_states);
+            nr_aligned_free(old_states);
+            if (new_model) rnnoise_model_free(new_model);
+            if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
+            return;
+        }
     }
 
-    // Recreate DenoiseState with the new model and flush ring buffers so
-    // stale frames from the old model do not feed into the new one.
-    for (int i = 0; i < _rnnr_count; i++)
+    RNNModel *old_model = _rnnr_model;
+    _rnnr_model = new_model;
+
+    // Swap in fully-created states.  The audio thread keeps using the old
+    // state while file I/O and allocation happen, then blocks only for this
+    // short pointer exchange.
+    for (int i = 0; i < count; i++)
     {
         RNNR a = _rnnr_instances[i];
         NR_MUTEX_LOCK(a->cs);
-        a->st = rnnoise_create(_rnnr_model);
-        a->run = a->run_old;
+        old_states[i] = a->st;
+        a->st = new_states ? new_states[i] : rnnr_create_state_safe(new_model);
         // Flush any buffered audio to avoid stale frames at the new model
         a->input_ring.head  = a->input_ring.tail  = a->input_ring.count  = 0;
         a->output_ring.head = a->output_ring.tail = a->output_ring.count = 0;
         rnnr_agc_init(a);
         NR_MUTEX_UNLOCK(a->cs);
     }
+
+    for (int i = 0; i < count; i++)
+        if (old_states[i]) rnnoise_destroy(old_states[i]);
+    if (old_model) rnnoise_model_free(old_model);
+    nr_aligned_free(new_states);
+    nr_aligned_free(old_states);
 
     if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
 }

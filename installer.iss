@@ -86,8 +86,16 @@ Source: "libs\rnnoise\rnnoise_avx2.dll"; \
 Source: "libs\rnnoise\rnnoise_weights_small.bin"; \
     DestDir: "{commoncf64}\CLAP"; \
     Flags: ignoreversion
+Source: "libs\rnnoise\rnnoise_weights_small.bin"; \
+    DestDir: "{commoncf64}\CLAP"; \
+    DestName: "rnnoise-small.bin"; \
+    Flags: ignoreversion
 Source: "libs\rnnoise\rnnoise_weights_large.bin"; \
     DestDir: "{commoncf64}\CLAP"; \
+    Flags: ignoreversion
+Source: "libs\rnnoise\rnnoise_weights_large.bin"; \
+    DestDir: "{commoncf64}\CLAP"; \
+    DestName: "rnnoise-large.bin"; \
     Flags: ignoreversion
 
 ; --- SpecBleach runtime ---

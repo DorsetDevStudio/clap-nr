@@ -671,8 +671,8 @@ static void render_frame(clap_nr_gui_s *g)
         ImGui::TextUnformatted("Model:");
         ImGui::SameLine();
         /* Disable buttons briefly after a switch to prevent queuing multiple
-         * back-to-back file loads.  1.5 s covers even a slow large-model read. */
-        static constexpr double NR3_MODEL_DEBOUNCE_SECS = 1.5;
+         * back-to-back model swaps on slower hosts. */
+        static constexpr double NR3_MODEL_DEBOUNCE_SECS = 3.0;
         const bool nr3_busy = (ImGui::GetTime() - g->nr3_model_fire_time) < NR3_MODEL_DEBOUNCE_SECS;
         if (nr3_busy) ImGui::BeginDisabled();
         for (int i = 0; i < 3; ++i) {

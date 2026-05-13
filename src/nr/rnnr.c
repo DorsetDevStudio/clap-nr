@@ -87,12 +87,17 @@ static RNNR* _rnnr_instances = NULL;
 static int _rnnr_count = 0;
 static int _rnnr_capacity = 0;
 
-// the model to use when creating new RNNR instances
-static RNNModel* _rnnr_model = NULL;
-
 // serialises RNNRloadModel so that concurrent or rapid calls cannot race
 static NR_MUTEX _rnnr_load_cs;
 static int      _rnnr_load_cs_inited = 0;
+
+static void rnnr_registry_ensure_lock(void)
+{
+    if (!_rnnr_load_cs_inited) {
+        NR_MUTEX_INIT(_rnnr_load_cs);
+        _rnnr_load_cs_inited = 1;
+    }
+}
 
 static RNNModel *rnnr_model_from_filename_safe(const char *file_path)
 {
@@ -226,9 +231,8 @@ RNNR create_rnnr(int run, int position, int size, double* in, double* out, int r
     a->run = run;
     a->position = position;
     a->rate = rate; // not used currently, but here for future use
-    a->st = rnnr_create_state_safe(_rnnr_model);
-    if (!a->st && _rnnr_model)
-        a->st = rnnr_create_state_safe(NULL);
+    a->model = NULL;
+    a->st = rnnr_create_state_safe(NULL);
     a->frame_size = rnnoise_get_frame_size();
     a->in = in;
     a->out = out;
@@ -242,6 +246,8 @@ RNNR create_rnnr(int run, int position, int size, double* in, double* out, int r
     a->output_buffer = malloc0(a->buffer_size * sizeof(float));
 
     // used to maintain a record of RNNR's here and is used so we can update them all if/when model is changed
+    rnnr_registry_ensure_lock();
+    NR_MUTEX_LOCK(_rnnr_load_cs);
     if (_rnnr_count == _rnnr_capacity)
     {
         int new_cap = _rnnr_capacity ? _rnnr_capacity * 2 : 4; // limit number of reallocs by doubling space each time, overkill but that is my middle name ;)
@@ -250,12 +256,9 @@ RNNR create_rnnr(int run, int position, int size, double* in, double* out, int r
         nr_aligned_free(_rnnr_instances);
         _rnnr_instances = tmp;
         _rnnr_capacity = new_cap;
-        if (!_rnnr_load_cs_inited) {
-            NR_MUTEX_INIT(_rnnr_load_cs);
-            _rnnr_load_cs_inited = 1;
-        }
     }
     _rnnr_instances[_rnnr_count++] = a;
+    NR_MUTEX_UNLOCK(_rnnr_load_cs);
     //
 
     return a;
@@ -347,6 +350,7 @@ void xrnnr(RNNR a, int pos)
 void destroy_rnnr(RNNR a)
 {
     // we dont need to maintain order, so just replace with last, and decrement total
+    if (_rnnr_load_cs_inited) NR_MUTEX_LOCK(_rnnr_load_cs);
     for (int i = 0; i < _rnnr_count; i++)
     {
         if (_rnnr_instances[i] == a)
@@ -355,10 +359,23 @@ void destroy_rnnr(RNNR a)
             break;
         }
     }
+    if (_rnnr_count == 0)
+    {
+        nr_aligned_free(_rnnr_instances);
+        _rnnr_instances = NULL;
+        _rnnr_capacity = 0;
+    }
+    if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
 
     NR_MUTEX_LOCK(a->cs);
-    rnnoise_destroy(a->st);
+    a->run = 0;
+    DenoiseState *old_st = a->st;
+    RNNModel *old_model = a->model;
+    a->st = NULL;
+    a->model = NULL;
     NR_MUTEX_UNLOCK(a->cs);
+    if (old_st) rnnoise_destroy(old_st);
+    if (old_model) rnnoise_model_free(old_model);
     NR_MUTEX_DESTROY(a->cs);
 
     nr_aligned_free(a->to_process_buffer);
@@ -368,17 +385,48 @@ void destroy_rnnr(RNNR a)
     ring_buffer_free(&a->output_ring);
     nr_aligned_free(a);
 
-    // tidy if none now in use
-    if (_rnnr_count == 0)
+    // Keep the registry mutex alive for the process lifetime. It is tiny, and
+    // destroying/reinitialising it while hosts create/remove instances rapidly
+    // is a needless multi-instance race.
+}
+
+#ifndef CLAP_NR_STANDALONE
+PORT
+#endif
+void RNNRloadModelInstance(RNNR a, const char* file_path)
+{
+    if (!a) return;
+
+    RNNModel *new_model = NULL;
+    if (file_path && file_path[0])
+        new_model = rnnr_model_from_filename_safe(file_path);
+
+    DenoiseState *new_st = rnnr_create_state_safe(new_model);
+    if (!new_st && new_model)
     {
-        nr_aligned_free(_rnnr_instances);
-        _rnnr_instances = NULL;
-        _rnnr_capacity = 0;
-        if (_rnnr_load_cs_inited) {
-            NR_MUTEX_DESTROY(_rnnr_load_cs);
-            _rnnr_load_cs_inited = 0;
-        }
+        rnnoise_model_free(new_model);
+        new_model = NULL;
+        new_st = rnnr_create_state_safe(NULL);
     }
+
+    if (!new_st)
+    {
+        if (new_model) rnnoise_model_free(new_model);
+        return;
+    }
+
+    NR_MUTEX_LOCK(a->cs);
+    DenoiseState *old_st = a->st;
+    RNNModel *old_model = a->model;
+    a->st = new_st;
+    a->model = new_model;
+    a->input_ring.head  = a->input_ring.tail  = a->input_ring.count  = 0;
+    a->output_ring.head = a->output_ring.tail = a->output_ring.count = 0;
+    rnnr_agc_init(a);
+    NR_MUTEX_UNLOCK(a->cs);
+
+    if (old_st) rnnoise_destroy(old_st);
+    if (old_model) rnnoise_model_free(old_model);
 }
 
 #ifndef CLAP_NR_STANDALONE
@@ -386,97 +434,15 @@ PORT
 #endif
 void RNNRloadModel(const char* file_path)
 {
-    /* Serialise concurrent callers.  The main caller (clap_nr.c) now routes
-     * all model changes through plugin_on_main_thread so concurrent calls
-     * should not occur in normal use -- but this mutex is the safety net. */
-    if (_rnnr_load_cs_inited) NR_MUTEX_LOCK(_rnnr_load_cs);
-
-    RNNModel *new_model = NULL;
-    if (file_path && file_path[0])
-        new_model = rnnr_model_from_filename_safe(file_path);
-
-    int count = _rnnr_count;
-    DenoiseState **new_states = NULL;
-    DenoiseState **old_states = NULL;
-
-    if (count > 0)
-    {
-        new_states = malloc0((size_t)count * sizeof(DenoiseState *));
-        old_states = malloc0((size_t)count * sizeof(DenoiseState *));
-        if (!new_states || !old_states)
-        {
-            nr_aligned_free(new_states);
-            nr_aligned_free(old_states);
-            if (new_model) rnnoise_model_free(new_model);
-            if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
-            return;
-        }
-
-        int ok = 1;
-        for (int i = 0; i < count; i++)
-        {
-            new_states[i] = rnnr_create_state_safe(new_model);
-            if (!new_states[i]) { ok = 0; break; }
-        }
-
-        if (!ok && new_model)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                if (new_states[i]) {
-                    rnnoise_destroy(new_states[i]);
-                    new_states[i] = NULL;
-                }
-            }
-            rnnoise_model_free(new_model);
-            new_model = NULL;
-            ok = 1;
-            for (int i = 0; i < count; i++)
-            {
-                new_states[i] = rnnr_create_state_safe(NULL);
-                if (!new_states[i]) { ok = 0; break; }
-            }
-        }
-
-        if (!ok)
-        {
-            for (int i = 0; i < count; i++)
-                if (new_states[i]) rnnoise_destroy(new_states[i]);
-            nr_aligned_free(new_states);
-            nr_aligned_free(old_states);
-            if (new_model) rnnoise_model_free(new_model);
-            if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
-            return;
-        }
-    }
-
-    RNNModel *old_model = _rnnr_model;
-    _rnnr_model = new_model;
-
-    // Swap in fully-created states.  The audio thread keeps using the old
-    // state while file I/O and allocation happen, then blocks only for this
-    // short pointer exchange.
-    for (int i = 0; i < count; i++)
-    {
-        RNNR a = _rnnr_instances[i];
-        NR_MUTEX_LOCK(a->cs);
-        old_states[i] = a->st;
-        a->st = new_states ? new_states[i] : rnnr_create_state_safe(new_model);
-        // Flush any buffered audio to avoid stale frames at the new model
-        a->input_ring.head  = a->input_ring.tail  = a->input_ring.count  = 0;
-        a->output_ring.head = a->output_ring.tail = a->output_ring.count = 0;
-        rnnr_agc_init(a);
-        NR_MUTEX_UNLOCK(a->cs);
-    }
-
-    for (int i = 0; i < count; i++)
-        if (old_states[i]) rnnoise_destroy(old_states[i]);
-    if (old_model) rnnoise_model_free(old_model);
-    nr_aligned_free(new_states);
-    nr_aligned_free(old_states);
-
-    if (_rnnr_load_cs_inited) NR_MUTEX_UNLOCK(_rnnr_load_cs);
+    /* Legacy/global entry point used by the original Thetis-style API.
+     * CLAP uses RNNRloadModelInstance() so each plugin instance is isolated. */
+    rnnr_registry_ensure_lock();
+    NR_MUTEX_LOCK(_rnnr_load_cs);
+    for (int i = 0; i < _rnnr_count; i++)
+        RNNRloadModelInstance(_rnnr_instances[i], file_path);
+    NR_MUTEX_UNLOCK(_rnnr_load_cs);
 }
+
 
 #ifndef CLAP_NR_STANDALONE
 PORT

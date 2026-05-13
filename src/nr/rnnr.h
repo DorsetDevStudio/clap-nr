@@ -69,6 +69,7 @@ typedef struct _rnnr
     int position;
     int frame_size;
     DenoiseState *st;
+    RNNModel *model;
     double *in;
     double *out;
     float gain;
@@ -96,6 +97,7 @@ extern void setBuffers_rnnr (RNNR a, double* in, double* out);
 extern void destroy_rnnr (RNNR a);
 extern void xrnnr (RNNR a, int pos);
 extern void setSamplerate_rnnr(RNNR a, int rate);
+extern void RNNRloadModelInstance(RNNR a, const char* file_path);
 extern void RNNRloadModel(const char* file_path);
 
 #endif //_rnnr_h

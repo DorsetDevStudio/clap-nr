@@ -417,10 +417,23 @@ static void apply_nr_mode(clap_nr_t *self, int new_mode)
  * 2 = rnnoise_weights_large.bin  (beside the .clap)
  * If the file cannot be found, falls back to the built-in model silently.
  * --------------------------------------------------------------------- */
+static void apply_nr3_model_path(clap_nr_t *self, const char *path)
+{
+    for (int ch = 0; ch < 2; ++ch) {
+        if (self->rnnr[ch])
+            RNNRloadModelInstance(self->rnnr[ch], path);
+        self->rnnr_in_count[ch]  = 0;
+        self->rnnr_out_head[ch]  = 0;
+        self->rnnr_out_avail[ch] = 0;
+        memset(self->rnnr_inbuf[ch],  0, sizeof(self->rnnr_inbuf[ch]));
+        memset(self->rnnr_outbuf[ch], 0, sizeof(self->rnnr_outbuf[ch]));
+    }
+}
+
 static void apply_nr3_model(clap_nr_t *self, int model)
 {
     if (model == 0) {
-        RNNRloadModel(NULL);
+        apply_nr3_model_path(self, NULL);
         return;
     }
 #ifdef _WIN32
@@ -430,7 +443,7 @@ static void apply_nr3_model(clap_nr_t *self, int model)
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             (LPCSTR)&apply_nr3_model, &hmod) ||
         !GetModuleFileNameA(hmod, path, MAX_PATH)) {
-        RNNRloadModel(NULL);
+        apply_nr3_model_path(self, NULL);
         return;
     }
     char *slash = strrchr(path, '\\');
@@ -439,14 +452,14 @@ static void apply_nr3_model(clap_nr_t *self, int model)
     char path[PATH_MAX];
     Dl_info di;
     if (!dladdr((void *)apply_nr3_model, &di) || !di.dli_fname) {
-        RNNRloadModel(NULL);
+        apply_nr3_model_path(self, NULL);
         return;
     }
     strncpy(path, di.dli_fname, PATH_MAX - 1);
     path[PATH_MAX - 1] = '\0';
     char *slash = strrchr(path, '/');
 #endif
-    if (!slash) { RNNRloadModel(NULL); return; }
+    if (!slash) { apply_nr3_model_path(self, NULL); return; }
     *(slash + 1) = '\0';
     const char *candidates[2];
     if (model == 1) {
@@ -479,13 +492,13 @@ static void apply_nr3_model(clap_nr_t *self, int model)
             memcpy(path, base_path, dlen + 1);
             memcpy(path + dlen, fname, flen + 1);
             if (nr_file_exists_readable(path)) {
-                RNNRloadModel(path);
+                apply_nr3_model_path(self, path);
                 return;
             }
         }
     }
     nr_log("NR3 model file missing for selection %d; falling back to built-in", model);
-    RNNRloadModel(NULL);
+    apply_nr3_model_path(self, NULL);
 }
 
 static void handle_param_event(clap_nr_t *self, const clap_event_param_value_t *pv)
@@ -926,6 +939,9 @@ static bool plugin_activate(const clap_plugin_t *p, double sr,
         }
 
         apply_nr_mode(self, self->nr_mode);
+        apply_nr3_model(self, self->nr3_model);
+        self->nr3_model_dirty = false;
+        self->nr3_callback_pending = false;
         ok = true;
 #ifdef _WIN32
     }

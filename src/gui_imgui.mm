@@ -1006,8 +1006,11 @@ static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
      * a separate ImGuiContext.  We guard on imgui_ctx != nullptr so that
      * messages that arrive before WM_CREATE (none, in practice) or after
      * ImGui::DestroyContext() skip the call safely. */
-    if (g && g->imgui_ctx)
+    bool has_instance_context = false;
+    if (g && g->imgui_ctx) {
         ImGui::SetCurrentContext(g->imgui_ctx);
+        has_instance_context = true;
+    }
 
     /* Guard: ImGui_ImplWin32_WndProcHandler dereferences the ImGui context
      * (calls ImGui::GetIO() which reads GImGui).  If gui_win32_cleanup() has
@@ -1018,7 +1021,7 @@ static LRESULT CALLBACK imgui_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
      * WM_DESTROY (and WM_NCDESTROY, WM_SIZE, WM_NCPAINT, ...) back through
      * this WndProc.  Skipping the handler when the context is gone is safe
      * because ImGui no longer needs to process input at that point. */
-    if (ImGui::GetCurrentContext() &&
+    if (has_instance_context &&
         ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp))
         return 1;
 
